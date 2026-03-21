@@ -121,7 +121,7 @@ public:
           changed_at_(size_, -1.0),
           match_mask_(size_, 0) {
         set_title("Memory Viewer");
-        set_default_size(1200, 720);
+        set_default_size(1180, 680);
 
         if (size_ > 0) {
             std::memcpy(last_seen_.data(), memory_, size_);
@@ -177,7 +177,7 @@ public:
         area_.set_draw_func(sigc::mem_fun(*this, &MemViewerWindow::on_draw));
         area_.set_hexpand(true);
         area_.set_vexpand(true);
-        area_.set_content_width(1400);
+        area_.set_content_width(1020);
         area_.set_content_height(static_cast<int>(rows_ * row_height_));
         area_.add_controller(click_controller_);
 
@@ -569,13 +569,13 @@ private:
     size_t last_visible_begin_ = std::numeric_limits<size_t>::max();
     size_t last_visible_end_ = std::numeric_limits<size_t>::max();
 
-    const double row_height_ = 24.0;
-    const double font_size_ = 14.0;
-    const double baseline_y_ = 17.0;
-    const double hex_start_x_ = 130.0;
-    const double ascii_start_x_ = 790.0;
-    const double hex_cell_width_ = 13.0;
-    const double ascii_cell_width_ = 12.0;
+    const double row_height_ = 20.0;
+    const double font_size_ = 12.0;
+    const double baseline_y_ = 14.5;
+    const double hex_start_x_ = 96.0;
+    const double ascii_start_x_ = 580.0;
+    const double hex_cell_width_ = 10.0;
+    const double ascii_cell_width_ = 9.0;
 };
 
 struct MemViewerImpl {
