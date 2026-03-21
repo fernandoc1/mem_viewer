@@ -4,6 +4,7 @@ test_c
 test_sdl
 test_file
 mem_viewer_helper
+test_shared
 *~
 *.swp
 *.tmp

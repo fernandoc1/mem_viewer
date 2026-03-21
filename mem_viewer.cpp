@@ -1,4 +1,5 @@
 #include "mem_viewer.h"
+#include "mem_viewer_gui.h"
 
 #include <csignal>
 #include <cstddef>
@@ -139,6 +140,31 @@ extern "C" MemViewer *mem_viewer_open(void *memory, size_t size) {
     }
 
     mem_viewer_debug_log("spawned helper child_pid=%ld", static_cast<long>(child));
+    auto *viewer = new MemViewer;
+    viewer->process = new MemViewerProcess(child);
+    return viewer;
+}
+
+extern "C" MemViewer *mem_viewer_open_shared(void *memory, size_t size) {
+    if (memory == nullptr || size == 0) {
+        mem_viewer_debug_log("mem_viewer_open_shared rejected memory=%p size=%zu", memory, size);
+        return nullptr;
+    }
+
+    mem_viewer_debug_log("mem_viewer_open_shared memory=%p size=%zu", memory, size);
+    const pid_t child = fork();
+    if (child < 0) {
+        mem_viewer_debug_log("fork failed in mem_viewer_open_shared: %s", std::strerror(errno));
+        return nullptr;
+    }
+
+    if (child == 0) {
+        mem_viewer_debug_log("shared child entering GUI directly");
+        const int status = mem_viewer_run_gui_shared(memory, size);
+        _exit(status == 0 ? 0 : 1);
+    }
+
+    mem_viewer_debug_log("spawned shared child_pid=%ld", static_cast<long>(child));
     auto *viewer = new MemViewer;
     viewer->process = new MemViewerProcess(child);
     return viewer;

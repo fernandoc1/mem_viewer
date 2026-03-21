@@ -6,5 +6,6 @@
 #include <sys/types.h>
 
 int mem_viewer_run_gui(pid_t target_pid, uintptr_t target_address, size_t size);
+int mem_viewer_run_gui_shared(void *memory, size_t size);
 
 #endif

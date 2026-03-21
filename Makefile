@@ -18,10 +18,10 @@ LIB_OBJECTS := $(LIB_SOURCES:.cpp=.o)
 GUI_SOURCES := mem_viewer_gui.cpp
 GUI_OBJECTS := $(GUI_SOURCES:.cpp=.o)
 
-all: libmemviewer.so mem_viewer_helper test_c test_sdl test_file
+all: libmemviewer.so mem_viewer_helper test_c test_sdl test_file test_shared
 
-libmemviewer.so: $(LIB_OBJECTS)
-	$(CXX) -shared -o $@ $(LIB_OBJECTS) $(DL_LIBS)
+libmemviewer.so: $(LIB_OBJECTS) $(GUI_OBJECTS)
+	$(CXX) -shared -o $@ $(LIB_OBJECTS) $(GUI_OBJECTS) $(GTKMM_LIBS) $(DL_LIBS)
 
 mem_viewer_helper: mem_viewer_helper.o $(GUI_OBJECTS)
 	$(CXX) -o $@ mem_viewer_helper.o $(GUI_OBJECTS) $(GTKMM_LIBS)
@@ -53,7 +53,13 @@ test_sdl: test_sdl.o libmemviewer.so
 test_file: test_file.o libmemviewer.so
 	$(CXX) -o $@ test_file.o -L. -lmemviewer -Wl,-rpath,'$$ORIGIN'
 
+test_shared.o: test_shared.c mem_viewer.h
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+test_shared: test_shared.o libmemviewer.so
+	$(CC) -o $@ test_shared.o -L. -lmemviewer -Wl,-rpath,'$$ORIGIN'
+
 clean:
-	rm -f *.o *.so mem_viewer_helper test_c test_sdl test_file
+	rm -f *.o *.so mem_viewer_helper test_c test_sdl test_file test_shared
 
 .PHONY: all clean
