@@ -307,24 +307,23 @@ public:
         }
 
         const std::vector<size_t> normalized_positions = normalizePositions(positions);
-        const auto existing = std::find_if(annotations_.begin(), annotations_.end(), [&](const AnnotationEntry &entry) {
-            return entry.positions == normalized_positions;
-        });
+        removePositionsFromAnnotations(normalized_positions);
 
-        if (trim_copy(note).empty()) {
-            if (existing != annotations_.end()) {
-                annotations_.erase(existing);
-            }
-        } else {
+        if (!trim_copy(note).empty()) {
             AnnotationEntry entry;
             entry.positions = normalized_positions;
             entry.note = note;
-            if (existing != annotations_.end()) {
-                *existing = std::move(entry);
-            } else {
-                annotations_.push_back(std::move(entry));
-            }
+            annotations_.push_back(std::move(entry));
         }
+        return save(error_message);
+    }
+
+    bool clearAnnotationPositions(const std::vector<size_t> &positions, QString *error_message = nullptr) {
+        if (positions.empty()) {
+            return true;
+        }
+
+        removePositionsFromAnnotations(normalizePositions(positions));
         return save(error_message);
     }
 
@@ -349,6 +348,35 @@ private:
             }
         }
         return true;
+    }
+
+    void removePositionsFromAnnotations(const std::vector<size_t> &positions_to_remove) {
+        std::vector<AnnotationEntry> updated_annotations;
+        updated_annotations.reserve(annotations_.size() + 1);
+
+        for (const AnnotationEntry &entry : annotations_) {
+            std::vector<size_t> remaining_positions;
+            remaining_positions.reserve(entry.positions.size());
+
+            size_t remove_index = 0;
+            for (size_t position : entry.positions) {
+                while (remove_index < positions_to_remove.size() && positions_to_remove[remove_index] < position) {
+                    ++remove_index;
+                }
+                if (remove_index < positions_to_remove.size() && positions_to_remove[remove_index] == position) {
+                    continue;
+                }
+                remaining_positions.push_back(position);
+            }
+
+            if (remaining_positions.empty()) {
+                continue;
+            }
+
+            updated_annotations.push_back({remaining_positions, entry.note});
+        }
+
+        annotations_ = std::move(updated_annotations);
     }
 
     bool save(QString *error_message) const {
@@ -1224,6 +1252,10 @@ public:
         annotation_editor_->setPlaceholderText("Select one or more bytes and type notes here");
         annotation_editor_->setEnabled(false);
         annotation_layout->addWidget(annotation_editor_);
+
+        clear_annotation_button_ = new QPushButton("Clear selected annotations");
+        clear_annotation_button_->setEnabled(false);
+        annotation_layout->addWidget(clear_annotation_button_);
         side_layout->addWidget(annotation_frame);
 
         QFrame *status_frame = new QFrame();
@@ -1261,6 +1293,9 @@ public:
 
         connect(annotation_editor_, &QTextEdit::textChanged, this, [this]() {
             onAnnotationEdited();
+        });
+        connect(clear_annotation_button_, &QPushButton::clicked, this, [this]() {
+            clearSelectedAnnotations();
         });
 
         updateStatus(std::numeric_limits<size_t>::max(), 0);
@@ -1358,6 +1393,7 @@ private:
 
         const bool can_edit = !current_selection_.empty();
         annotation_editor_->setEnabled(can_edit);
+        clear_annotation_button_->setEnabled(can_edit && annotation_store_.hasFilePath());
 
         active_annotation_ = annotation_store_.resolveForSelection(current_selection_);
         const QString note = QString::fromStdString(active_annotation_.note);
@@ -1382,6 +1418,21 @@ private:
             return;
         }
         active_annotation_ = annotation_store_.resolveForSelection(current_selection_);
+        updateStatus();
+    }
+
+    void clearSelectedAnnotations() {
+        if (current_selection_.empty() || !annotation_store_.hasFilePath()) {
+            return;
+        }
+
+        QString error_message;
+        if (!annotation_store_.clearAnnotationPositions(current_selection_, &error_message)) {
+            QMessageBox::warning(this, QStringLiteral("Annotations"), error_message);
+            return;
+        }
+
+        updateAnnotationUi();
         updateStatus();
     }
 
@@ -1442,6 +1493,7 @@ private:
     QLabel *annotation_selection_label_;
     QLabel *annotation_file_label_;
     QTextEdit *annotation_editor_;
+    QPushButton *clear_annotation_button_;
     QLabel *status_label_;
     AnnotationStore annotation_store_;
     AnnotationStore::ResolvedAnnotation active_annotation_;
