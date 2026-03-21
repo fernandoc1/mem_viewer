@@ -631,31 +631,35 @@ struct MemViewerImpl {
     std::atomic<bool> open;
     std::atomic<bool> shutdown;
     std::thread ui_thread;
-    Glib::RefPtr<Glib::MainLoop> loop;
+    Glib::RefPtr<Gtk::Application> app;
     MemViewerWindow *window = nullptr;
+    std::unique_ptr<MemViewerWindow> owned_window;
 };
 
 static void run_ui_thread(MemViewerImpl *impl) {
-    Glib::init();
-    Gio::init();
-    Gtk::init_gtkmm_internals();
+    auto app = Gtk::Application::create("com.example.memviewer", Gio::Application::Flags::NON_UNIQUE);
+    impl->app = app;
 
-    if (gtk_init_check() == FALSE) {
-        impl->open.store(false, std::memory_order_relaxed);
-        return;
-    }
+    app->signal_activate().connect([impl, app]() {
+        if (impl->owned_window) {
+            impl->owned_window->present();
+            return;
+        }
 
-    MemViewerWindow window(impl->memory, impl->size, impl->open);
-    auto loop = Glib::MainLoop::create(false);
-    impl->loop = loop;
-    impl->window = &window;
-    impl->open.store(true, std::memory_order_relaxed);
-    window.signal_hide().connect([loop]() { loop->quit(); });
-    window.present();
-    loop->run();
+        impl->owned_window = std::make_unique<MemViewerWindow>(impl->memory, impl->size, impl->open);
+        impl->window = impl->owned_window.get();
+        impl->open.store(true, std::memory_order_relaxed);
+        impl->window->signal_hide().connect([app]() { app->quit(); });
+        app->add_window(*impl->window);
+        impl->window->present();
+    });
+
+    app->run();
+
     impl->window = nullptr;
-    impl->loop.reset();
+    impl->owned_window.reset();
     impl->open.store(false, std::memory_order_relaxed);
+    impl->app.reset();
 }
 
 }  // namespace
@@ -683,9 +687,9 @@ extern "C" void mem_viewer_destroy(MemViewer *viewer) {
     MemViewerImpl *impl = viewer->impl;
     impl->shutdown.store(true, std::memory_order_relaxed);
 
-    if (impl->loop) {
-        auto loop = impl->loop;
-        Glib::signal_idle().connect_once([loop]() { loop->quit(); });
+    if (impl->app) {
+        auto app = impl->app;
+        Glib::signal_idle().connect_once([app]() { app->quit(); });
     }
 
     if (impl->ui_thread.joinable()) {
