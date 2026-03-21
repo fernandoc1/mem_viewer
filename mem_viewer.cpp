@@ -107,8 +107,9 @@ public:
         : memory_(memory),
           size_(size),
           open_flag_(open_flag),
-          root_(Gtk::Orientation::VERTICAL, 8),
-          toolbar_(Gtk::Orientation::HORIZONTAL, 8),
+          root_(Gtk::Orientation::HORIZONTAL, 10),
+          main_panel_(Gtk::Orientation::VERTICAL, 8),
+          side_panel_(Gtk::Orientation::VERTICAL, 8),
           search_nav_(Gtk::Orientation::HORIZONTAL, 4),
           auto_refresh_("Auto refresh"),
           refresh_button_("Refresh"),
@@ -133,43 +134,85 @@ public:
         root_.set_margin_end(8);
         set_child(root_);
 
+        main_panel_.set_hexpand(true);
+        main_panel_.set_vexpand(true);
+        root_.append(main_panel_);
+
+        side_panel_.set_size_request(260, -1);
+        root_.append(side_panel_);
+
         auto_refresh_.set_active(true);
-        toolbar_.append(auto_refresh_);
-        toolbar_.append(refresh_button_);
 
         width_combo_.append("1");
         width_combo_.append("2");
         width_combo_.append("4");
         width_combo_.append("8");
         width_combo_.set_active(0);
-        toolbar_.append(*Gtk::make_managed<Gtk::Label>("Search"));
-        toolbar_.append(search_entry_);
-        toolbar_.append(*Gtk::make_managed<Gtk::Label>("Format"));
         format_combo_.append("Hex");
         format_combo_.append("Decimal");
         format_combo_.set_active(0);
-        toolbar_.append(format_combo_);
-        toolbar_.append(*Gtk::make_managed<Gtk::Label>("Bytes"));
-        toolbar_.append(width_combo_);
-        toolbar_.append(*Gtk::make_managed<Gtk::Label>("Endian"));
         endian_combo_.append("Little");
         endian_combo_.append("Big");
         endian_combo_.set_active(0);
-        toolbar_.append(endian_combo_);
+
+        auto *refresh_frame = Gtk::make_managed<Gtk::Frame>("Refresh");
+        auto *refresh_box = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 6);
+        refresh_box->set_margin_top(8);
+        refresh_box->set_margin_bottom(8);
+        refresh_box->set_margin_start(8);
+        refresh_box->set_margin_end(8);
+        refresh_box->append(auto_refresh_);
+        refresh_box->append(refresh_button_);
+        refresh_frame->set_child(*refresh_box);
+        side_panel_.append(*refresh_frame);
+
+        auto *search_frame = Gtk::make_managed<Gtk::Frame>("Search");
+        auto *search_box = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 6);
+        search_box->set_margin_top(8);
+        search_box->set_margin_bottom(8);
+        search_box->set_margin_start(8);
+        search_box->set_margin_end(8);
+        search_box->append(*Gtk::make_managed<Gtk::Label>("Value"));
+        search_box->append(search_entry_);
+        search_box->append(*Gtk::make_managed<Gtk::Label>("Format"));
+        search_box->append(format_combo_);
+        search_box->append(*Gtk::make_managed<Gtk::Label>("Bytes"));
+        search_box->append(width_combo_);
+        search_box->append(*Gtk::make_managed<Gtk::Label>("Endian"));
+        search_box->append(endian_combo_);
         search_nav_.append(prev_button_);
         search_nav_.append(next_button_);
-        toolbar_.append(search_nav_);
+        search_box->append(search_nav_);
+        search_frame->set_child(*search_box);
+        side_panel_.append(*search_frame);
 
         edit_entry_.set_placeholder_text("Selected byte: hex or decimal");
-        toolbar_.append(edit_entry_);
-        toolbar_.append(apply_button_);
+        auto *edit_frame = Gtk::make_managed<Gtk::Frame>("Edit");
+        auto *edit_box = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 6);
+        edit_box->set_margin_top(8);
+        edit_box->set_margin_bottom(8);
+        edit_box->set_margin_start(8);
+        edit_box->set_margin_end(8);
+        edit_box->append(*Gtk::make_managed<Gtk::Label>("Selected byte"));
+        edit_box->append(edit_entry_);
+        edit_box->append(apply_button_);
+        edit_frame->set_child(*edit_box);
+        side_panel_.append(*edit_frame);
 
-        root_.append(toolbar_);
-        root_.append(status_label_);
+        auto *status_frame = Gtk::make_managed<Gtk::Frame>("Status");
+        auto *status_box = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 6);
+        status_box->set_margin_top(8);
+        status_box->set_margin_bottom(8);
+        status_box->set_margin_start(8);
+        status_box->set_margin_end(8);
+        status_label_.set_wrap(true);
+        status_box->append(status_label_);
+        status_frame->set_child(*status_box);
+        side_panel_.append(*status_frame);
 
         scrolled_.set_policy(Gtk::PolicyType::NEVER, Gtk::PolicyType::AUTOMATIC);
         scrolled_.set_child(area_);
-        root_.append(scrolled_);
+        main_panel_.append(scrolled_);
 
         click_controller_ = Gtk::GestureClick::create();
         click_controller_->set_button(1);
@@ -540,7 +583,8 @@ private:
     std::atomic<bool> &open_flag_;
 
     Gtk::Box root_;
-    Gtk::Box toolbar_;
+    Gtk::Box main_panel_;
+    Gtk::Box side_panel_;
     Gtk::Box search_nav_;
     Gtk::CheckButton auto_refresh_;
     Gtk::Button refresh_button_;
