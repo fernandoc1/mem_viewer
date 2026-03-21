@@ -582,10 +582,15 @@ protected:
         QScrollBar *vscroll = verticalScrollBar();
         if (vscroll) {
             const int delta = event->angleDelta().y();
-            if (delta > 0) {
-                vscroll->triggerAction(QScrollBar::SliderPageStepSub);
-            } else {
-                vscroll->triggerAction(QScrollBar::SliderPageStepAdd);
+            if (delta != 0) {
+                const int numDegrees = delta / 8;
+                const int numSteps = numDegrees / 15;
+                for (int i = 0; i < std::abs(numSteps); ++i) {
+                    if (numSteps > 0)
+                        vscroll->triggerAction(QScrollBar::SliderSingleStepSub);
+                    else
+                        vscroll->triggerAction(QScrollBar::SliderSingleStepAdd);
+                }
             }
             event->accept();
         }
@@ -640,17 +645,21 @@ private:
     }
 
     QScrollBar *verticalScrollBar() const {
-        QScrollArea *scroll_area = qobject_cast<QScrollArea *>(parent());
-        if (scroll_area) {
-            return scroll_area->verticalScrollBar();
+        QWidget *p = parentWidget();
+        while (p) {
+            QScrollArea *sa = qobject_cast<QScrollArea *>(p);
+            if (sa) return sa->verticalScrollBar();
+            p = p->parentWidget();
         }
         return nullptr;
     }
 
     QWidget *viewport() {
-        QScrollArea *scroll_area = qobject_cast<QScrollArea *>(parent());
-        if (scroll_area) {
-            return scroll_area->viewport();
+        QWidget *p = parentWidget();
+        while (p) {
+            QScrollArea *sa = qobject_cast<QScrollArea *>(p);
+            if (sa) return sa->viewport();
+            p = p->parentWidget();
         }
         return this;
     }
