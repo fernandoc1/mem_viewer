@@ -23,7 +23,7 @@ static void mem_viewer_debug_log(const char *fmt, ...) {
         return;
     }
 
-    std::fprintf(stderr, "[mem_viewer_helper_main pid=%ld] ", static_cast<long>(getpid()));
+    std::fprintf(stderr, "[mem_viewer_helper pid=%ld] ", static_cast<long>(getpid()));
     va_list args;
     va_start(args, fmt);
     std::vfprintf(stderr, fmt, args);
@@ -62,6 +62,6 @@ int main(int argc, char **argv) {
         return 2;
     }
 
-    mem_viewer_debug_log("launching GUI");
+    mem_viewer_debug_log("launching Qt GUI");
     return mem_viewer_run_gui(pid, address, size);
 }

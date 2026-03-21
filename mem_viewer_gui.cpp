@@ -1,6 +1,25 @@
 #include "mem_viewer_gui.h"
 
-#include <gtkmm.h>
+#include <QApplication>
+#include <QCheckBox>
+#include <QComboBox>
+#include <QFrame>
+#include <QHBoxLayout>
+#include <QLabel>
+#include <QLineEdit>
+#include <QPushButton>
+#include <QScrollArea>
+#include <QScrollBar>
+#include <QTimer>
+#include <QVBoxLayout>
+#include <QWidget>
+#include <QPainter>
+#include <QFont>
+#include <QFontMetrics>
+#include <QMouseEvent>
+#include <QWheelEvent>
+#include <QResizeEvent>
+#include <QMainWindow>
 
 #include <algorithm>
 #include <atomic>
@@ -12,15 +31,16 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <csignal>
 #include <functional>
 #include <limits>
 #include <memory>
 #include <sstream>
 #include <string>
+#include <vector>
 #include <sys/prctl.h>
 #include <sys/uio.h>
 #include <unistd.h>
-#include <vector>
 
 namespace {
 
@@ -37,7 +57,7 @@ static void mem_viewer_debug_log(const char *fmt, ...) {
         return;
     }
 
-    std::fprintf(stderr, "[mem_viewer_helper pid=%ld] ", static_cast<long>(getpid()));
+    std::fprintf(stderr, "[mem_viewer_gui pid=%ld] ", static_cast<long>(getpid()));
     va_list args;
     va_start(args, fmt);
     std::vfprintf(stderr, fmt, args);
@@ -224,186 +244,60 @@ private:
     size_t size_;
 };
 
-class MemViewerWindow : public Gtk::Window {
+class MemViewerWidget : public QWidget {
 public:
-    MemViewerWindow(
+    MemViewerWidget(
         size_t memory_size,
         std::function<bool(size_t, void *, size_t)> read_memory,
         std::function<bool(size_t, const void *, size_t)> write_memory,
-        std::atomic<bool> &open_flag)
-        : memory_size_(memory_size),
+        std::atomic<bool> &open_flag,
+        QWidget *parent = nullptr)
+        : QWidget(parent),
+          memory_size_(memory_size),
           read_memory_(std::move(read_memory)),
           write_memory_(std::move(write_memory)),
           open_flag_(open_flag),
-          root_(Gtk::Orientation::HORIZONTAL, 10),
-          main_panel_(Gtk::Orientation::VERTICAL, 8),
-          side_panel_(Gtk::Orientation::VERTICAL, 8),
-          search_nav_(Gtk::Orientation::HORIZONTAL, 4),
-          auto_refresh_("Auto refresh"),
-          refresh_button_("Refresh"),
-          apply_button_("Write byte"),
-          prev_button_("Prev"),
-          next_button_("Next"),
-          status_label_("No byte selected"),
           rows_(memory_size_ == 0 ? 0 : ((memory_size_ + kBytesPerRow - 1) / kBytesPerRow)),
           last_seen_(memory_size_, 0),
           changed_at_(memory_size_, -1.0),
           match_mask_(memory_size_, 0) {
-        set_title("Memory Viewer");
-        set_default_size(900, 680);
-        set_hide_on_close(true);
-
-        root_.set_margin_top(8);
-        root_.set_margin_bottom(8);
-        root_.set_margin_start(8);
-        root_.set_margin_end(8);
-        set_child(root_);
-
-        main_panel_.set_hexpand(true);
-        main_panel_.set_vexpand(true);
-        root_.append(main_panel_);
-
-        side_panel_.set_size_request(180, -1);
-        root_.append(side_panel_);
-
-        auto_refresh_.set_active(true);
-
-        width_combo_.append("1");
-        width_combo_.append("2");
-        width_combo_.append("4");
-        width_combo_.append("8");
-        width_combo_.set_active(0);
-        format_combo_.append("Hex");
-        format_combo_.append("Decimal");
-        format_combo_.set_active(0);
-        endian_combo_.append("Little");
-        endian_combo_.append("Big");
-        endian_combo_.set_active(0);
-
-        auto *refresh_frame = Gtk::make_managed<Gtk::Frame>("Refresh");
-        auto *refresh_box = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 6);
-        refresh_box->set_margin_top(8);
-        refresh_box->set_margin_bottom(8);
-        refresh_box->set_margin_start(8);
-        refresh_box->set_margin_end(8);
-        refresh_box->append(auto_refresh_);
-        refresh_box->append(refresh_button_);
-        refresh_frame->set_child(*refresh_box);
-        side_panel_.append(*refresh_frame);
-
-        auto *search_frame = Gtk::make_managed<Gtk::Frame>("Search");
-        auto *search_box = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 6);
-        search_box->set_margin_top(8);
-        search_box->set_margin_bottom(8);
-        search_box->set_margin_start(8);
-        search_box->set_margin_end(8);
-        search_box->append(*Gtk::make_managed<Gtk::Label>("Value"));
-        search_box->append(search_entry_);
-        search_box->append(*Gtk::make_managed<Gtk::Label>("Format"));
-        search_box->append(format_combo_);
-        search_box->append(*Gtk::make_managed<Gtk::Label>("Bytes"));
-        search_box->append(width_combo_);
-        search_box->append(*Gtk::make_managed<Gtk::Label>("Endian"));
-        search_box->append(endian_combo_);
-        search_nav_.append(prev_button_);
-        search_nav_.append(next_button_);
-        search_box->append(search_nav_);
-        search_frame->set_child(*search_box);
-        side_panel_.append(*search_frame);
-
-        edit_entry_.set_placeholder_text("Selected byte: hex or decimal");
-        auto *edit_frame = Gtk::make_managed<Gtk::Frame>("Edit");
-        auto *edit_box = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 6);
-        edit_box->set_margin_top(8);
-        edit_box->set_margin_bottom(8);
-        edit_box->set_margin_start(8);
-        edit_box->set_margin_end(8);
-        edit_box->append(*Gtk::make_managed<Gtk::Label>("Selected byte"));
-        edit_box->append(edit_entry_);
-        edit_box->append(apply_button_);
-        edit_frame->set_child(*edit_box);
-        side_panel_.append(*edit_frame);
-
-        auto *status_frame = Gtk::make_managed<Gtk::Frame>("Status");
-        auto *status_box = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 6);
-        status_box->set_margin_top(8);
-        status_box->set_margin_bottom(8);
-        status_box->set_margin_start(8);
-        status_box->set_margin_end(8);
-        status_label_.set_wrap(true);
-        status_box->append(status_label_);
-        status_frame->set_child(*status_box);
-        side_panel_.append(*status_frame);
-
-        scrolled_.set_policy(Gtk::PolicyType::NEVER, Gtk::PolicyType::AUTOMATIC);
-        scrolled_.set_child(area_);
-        main_panel_.append(scrolled_);
-
-        click_controller_ = Gtk::GestureClick::create();
-        click_controller_->set_button(1);
-
-        area_.set_draw_func(sigc::mem_fun(*this, &MemViewerWindow::on_draw));
-        area_.set_hexpand(true);
-        area_.set_vexpand(true);
-        area_.set_content_width(static_cast<int>(content_width_));
-        area_.set_content_height(static_cast<int>(rows_ * row_height_));
-        area_.add_controller(click_controller_);
-
-        click_controller_->signal_pressed().connect(sigc::mem_fun(*this, &MemViewerWindow::on_click));
-        refresh_button_.signal_clicked().connect(sigc::mem_fun(*this, &MemViewerWindow::refresh_visible_bytes));
-        apply_button_.signal_clicked().connect(sigc::mem_fun(*this, &MemViewerWindow::apply_edit));
-        prev_button_.signal_clicked().connect(sigc::bind(sigc::mem_fun(*this, &MemViewerWindow::navigate_match), -1));
-        next_button_.signal_clicked().connect(sigc::bind(sigc::mem_fun(*this, &MemViewerWindow::navigate_match), 1));
-        search_entry_.signal_activate().connect(sigc::mem_fun(*this, &MemViewerWindow::rebuild_search));
-        format_combo_.signal_changed().connect(sigc::mem_fun(*this, &MemViewerWindow::rebuild_search));
-        width_combo_.signal_changed().connect(sigc::mem_fun(*this, &MemViewerWindow::rebuild_search));
-        endian_combo_.signal_changed().connect(sigc::mem_fun(*this, &MemViewerWindow::rebuild_search));
-        signal_close_request().connect(sigc::mem_fun(*this, &MemViewerWindow::on_close_request), false);
-
-        if (auto vadj = scrolled_.get_vadjustment()) {
-            vadj->signal_value_changed().connect(sigc::mem_fun(*this, &MemViewerWindow::on_scroll_changed));
-        }
-
-        timer_ = Glib::signal_timeout().connect(sigc::mem_fun(*this, &MemViewerWindow::on_timer), kRefreshMs);
-        refresh_visible_bytes();
+        
+        setFocusPolicy(Qt::StrongFocus);
+        setMinimumWidth(static_cast<int>(content_width_));
+        setMinimumHeight(static_cast<int>(rows_ * row_height_));
+        
+        timer_ = new QTimer(this);
+        connect(timer_, &QTimer::timeout, this, [this]() { onTimer(); });
+        timer_->start(kRefreshMs);
+        
+        refreshVisibleBytes();
     }
 
-    ~MemViewerWindow() override {
+    ~MemViewerWidget() override {
         open_flag_.store(false, std::memory_order_relaxed);
     }
 
-private:
-    bool on_close_request() {
-        mem_viewer_debug_log("window close request");
-        timer_.disconnect();
-        open_flag_.store(false, std::memory_order_relaxed);
-        hide();
-        return false;
-    }
-
-    bool on_timer() {
-        if (!auto_refresh_.get_active()) {
-            return true;
+    void setAutoRefresh(bool enabled) {
+        if (enabled) {
+            timer_->start(kRefreshMs);
+        } else {
+            timer_->stop();
         }
-        refresh_visible_bytes();
-        return true;
     }
 
-    void on_scroll_changed() {
-        refresh_visible_bytes();
-    }
-
-    void refresh_visible_bytes() {
+    void refreshVisibleBytes() {
         if (memory_size_ == 0) {
-            area_.queue_draw();
+            update();
             return;
         }
 
-        auto vadj = scrolled_.get_vadjustment();
-        const double value = vadj ? vadj->get_value() : 0.0;
-        const double page_size = vadj ? vadj->get_page_size() : 0.0;
-        const size_t first_row = static_cast<size_t>(std::max(0.0, std::floor(value / row_height_)));
-        const size_t visible_rows = static_cast<size_t>(std::ceil(page_size / row_height_)) + 2;
+        QScrollBar *vscroll = verticalScrollBar();
+        if (!vscroll) return;
+        
+        const int scroll_y = vscroll->value();
+        const int visible_height = viewport()->height();
+        const size_t first_row = static_cast<size_t>(std::max(0, static_cast<int>(std::floor(scroll_y / row_height_))));
+        const size_t visible_rows = static_cast<size_t>(std::ceil(visible_height / row_height_)) + 2;
         const size_t last_row = std::min(rows_, first_row + visible_rows);
         const size_t begin = std::min(memory_size_, first_row * kBytesPerRow);
         const size_t end = std::min(memory_size_, last_row * kBytesPerRow);
@@ -435,31 +329,29 @@ private:
             }
         }
 
-        update_status();
-        area_.queue_draw();
+        update();
     }
 
-    void rebuild_search() {
+    void rebuildSearch(const std::string &search_text, SearchFormat format, EndianMode endian, size_t width) {
         std::fill(match_mask_.begin(), match_mask_.end(), 0);
         matches_.clear();
         active_match_index_ = 0;
 
         uint64_t value = 0;
-        if (!parse_uint64_value(search_entry_.get_text(), current_search_format(), value)) {
-            area_.queue_draw();
-            update_status();
+        if (!parse_uint64_value(search_text, format, value)) {
+            update();
+            if (onSearchStatusUpdated) onSearchStatusUpdated();
             return;
         }
 
-        const size_t width = current_search_width();
         if (width == 0 || width > 8 || width > memory_size_) {
-            area_.queue_draw();
-            update_status();
+            update();
+            if (onSearchStatusUpdated) onSearchStatusUpdated();
             return;
         }
 
         std::vector<uint8_t> pattern(width);
-        if (current_endian_mode() == EndianMode::Little) {
+        if (endian == EndianMode::Little) {
             for (size_t i = 0; i < width; ++i) {
                 pattern[i] = static_cast<uint8_t>((value >> (8 * i)) & 0xffU);
             }
@@ -500,11 +392,11 @@ private:
             selected_index_ = matches_.front();
             scroll_to_index(selected_index_);
         }
-        update_status();
-        area_.queue_draw();
+        if (onSearchStatusUpdated) onSearchStatusUpdated();
+        update();
     }
 
-    void navigate_match(int direction) {
+    void navigateMatch(int direction) {
         if (matches_.empty()) {
             return;
         }
@@ -516,29 +408,43 @@ private:
         }
         selected_index_ = matches_[active_match_index_];
         scroll_to_index(selected_index_);
-        refresh_visible_bytes();
+        refreshVisibleBytes();
     }
 
-    void scroll_to_index(size_t index) {
-        if (auto vadj = scrolled_.get_vadjustment()) {
-            const double row_top = static_cast<double>((index / kBytesPerRow) * row_height_);
-            const double row_bottom = row_top + row_height_;
-            const double view_top = vadj->get_value();
-            const double view_bottom = view_top + vadj->get_page_size();
-            if (row_top < view_top) {
-                vadj->set_value(row_top);
-            } else if (row_bottom > view_bottom) {
-                vadj->set_value(row_bottom - vadj->get_page_size());
-            }
-        }
-    }
-
-    void apply_edit() {
-        if (selected_index_ >= memory_size_) {
+    void setSelectedIndex(size_t index) {
+        if (index >= memory_size_) {
             return;
         }
-        uint8_t value = 0;
-        if (!parse_byte_value(edit_entry_.get_text(), value)) {
+        selected_index_ = index;
+        uint8_t value = last_seen_[index];
+        if (read_memory_(index, &value, 1)) {
+            last_seen_[index] = value;
+        }
+        if (onByteSelected) onByteSelected(index, value);
+        update();
+    }
+
+    size_t getSelectedIndex() const {
+        return selected_index_;
+    }
+
+    uint8_t getSelectedValue() const {
+        if (selected_index_ >= memory_size_) {
+            return 0;
+        }
+        return last_seen_[selected_index_];
+    }
+
+    size_t getMatchCount() const {
+        return matches_.size();
+    }
+
+    size_t getMemorySize() const {
+        return memory_size_;
+    }
+
+    void applyEdit(uint8_t value) {
+        if (selected_index_ >= memory_size_) {
             return;
         }
         if (!write_memory_(selected_index_, &value, 1)) {
@@ -546,43 +452,114 @@ private:
         }
         last_seen_[selected_index_] = value;
         changed_at_[selected_index_] = now_seconds();
-        refresh_visible_bytes();
+        refreshVisibleBytes();
     }
 
-    void update_status() {
-        if (selected_index_ >= memory_size_) {
-            std::ostringstream ss;
-            ss << "Buffer size: " << memory_size_ << " bytes";
-            if (!matches_.empty()) {
-                ss << " | Matches: " << matches_.size();
+    std::function<void(size_t, uint8_t)> onByteSelected;
+    std::function<void()> onSearchStatusUpdated;
+
+protected:
+    void paintEvent(QPaintEvent *) override {
+        QPainter painter(this);
+        painter.setRenderHint(QPainter::Antialiasing);
+        
+        QScrollBar *vscroll = verticalScrollBar();
+        const int scroll_y = vscroll ? vscroll->value() : 0;
+        const int visible_height = height();
+        const size_t first_row = static_cast<size_t>(std::max(0, static_cast<int>(std::floor(scroll_y / row_height_))));
+        const size_t visible_rows = static_cast<size_t>(std::ceil(visible_height / row_height_)) + 2;
+        const size_t last_row = std::min(rows_, first_row + visible_rows);
+        const double now = now_seconds();
+
+        painter.fillRect(rect(), QColor(0x14, 0x16, 0x1A));
+
+        QFont font("Monospace", 11);
+        font.setStyleHint(QFont::Monospace);
+        painter.setFont(font);
+        QFontMetrics fm(font);
+        (void)fm;
+
+        for (size_t row = first_row; row < last_row; ++row) {
+            const double y = static_cast<double>(row * row_height_);
+            const size_t row_base = row * kBytesPerRow;
+
+            if ((row % 2) == 0) {
+                painter.fillRect(QRectF(0, y, width(), row_height_), QColor(0xFF, 0xFF, 0xFF, 6));
             }
-            status_label_.set_text(ss.str());
+
+            char addr[32];
+            std::snprintf(addr, sizeof(addr), "%08zx", row_base);
+            drawText(painter, address_x_, y + baseline_y_, QColor(0xBD, 0xC7, 0xD0), addr);
+
+            for (size_t col = 0; col < kBytesPerRow; ++col) {
+                const size_t index = row_base + col;
+                if (index >= memory_size_) {
+                    break;
+                }
+
+                const double cell_x = hex_start_x_ + static_cast<double>(col * 3) * hex_cell_width_;
+                const double ascii_x = ascii_start_x_ + static_cast<double>(col) * ascii_cell_width_;
+                const bool selected = index == selected_index_;
+                const bool matched = match_mask_[index] != 0;
+                const double age = changed_at_[index] < 0.0 ? kFadeSeconds : (now - changed_at_[index]);
+                const double fade = std::clamp(1.0 - (age / kFadeSeconds), 0.0, 1.0);
+                const uint8_t value = byteForIndex(index);
+
+                if (fade > 0.0 || selected || matched) {
+                    double r = 0.14;
+                    double g = 0.14;
+                    double b = 0.16;
+                    int a = 0;
+
+                    if (fade > 0.0) {
+                        r = 0.96;
+                        g = 0.38;
+                        b = 0.14;
+                        a = static_cast<int>(255 * (0.16 + 0.42 * fade));
+                    }
+                    if (matched) {
+                        r = 0.85;
+                        g = 0.72;
+                        b = 0.12;
+                        a = std::max(a, static_cast<int>(255 * 0.24));
+                    }
+                    if (selected) {
+                        r = 0.22;
+                        g = 0.64;
+                        b = 1.0;
+                        a = std::max(a, static_cast<int>(255 * 0.35));
+                    }
+
+                    painter.fillRect(QRectF(cell_x - 1.0, y + 1.5, hex_highlight_width_, row_height_ - 3.0),
+                                     QColor(static_cast<int>(r * 255), static_cast<int>(g * 255), static_cast<int>(b * 255), a));
+                    painter.fillRect(QRectF(ascii_x - 1.0, y + 1.5, ascii_highlight_width_, row_height_ - 3.0),
+                                     QColor(static_cast<int>(r * 255), static_cast<int>(g * 255), static_cast<int>(b * 255), a));
+                }
+
+                char hex[4];
+                std::snprintf(hex, sizeof(hex), "%02X", value);
+                drawText(painter, cell_x, y + baseline_y_, QColor(0xEE, 0xEE, 0xEF), hex);
+
+                char ascii[2] = { printable(value), '\0' };
+                drawText(painter, ascii_x, y + baseline_y_, QColor(0xCD, 0xDB, 0xE2), ascii);
+            }
+        }
+    }
+
+    void mousePressEvent(QMouseEvent *event) override {
+        if (event->button() != Qt::LeftButton) {
             return;
         }
 
-        const uint8_t value = last_seen_[selected_index_];
-        char text[256];
-        std::snprintf(
-            text,
-            sizeof(text),
-            "Selected: 0x%08zx | hex=%02X | dec=%u | Matches=%zu",
-            selected_index_,
-            value,
-            static_cast<unsigned>(value),
-            matches_.size());
-        status_label_.set_text(text);
-    }
-
-    void on_click(int, double x, double y) {
-        auto vadj = scrolled_.get_vadjustment();
-        const double scroll_y = vadj ? vadj->get_value() : 0.0;
-        const double absolute_y = y + scroll_y;
+        QScrollBar *vscroll = verticalScrollBar();
+        const int scroll_y = vscroll ? vscroll->value() : 0;
+        const double absolute_y = event->position().y() + scroll_y;
         const size_t row = static_cast<size_t>(absolute_y / row_height_);
         if (row >= rows_) {
             return;
         }
 
-        const double hex_x = x - hex_start_x_;
+        const double hex_x = event->position().x() - hex_start_x_;
         if (hex_x < 0.0) {
             return;
         }
@@ -598,113 +575,43 @@ private:
             return;
         }
 
-        selected_index_ = index;
-        uint8_t value = last_seen_[index];
-        if (read_memory_(index, &value, 1)) {
-            last_seen_[index] = value;
-        }
-        char text[8];
-        std::snprintf(text, sizeof(text), "%02X", value);
-        edit_entry_.set_text(text);
-        update_status();
-        area_.queue_draw();
+        setSelectedIndex(index);
     }
 
-    void on_draw(const Cairo::RefPtr<Cairo::Context> &cr, int width, int height) {
-        auto vadj = scrolled_.get_vadjustment();
-        const double scroll_y = vadj ? vadj->get_value() : 0.0;
-        const size_t first_row = static_cast<size_t>(std::max(0.0, std::floor(scroll_y / row_height_)));
-        const size_t visible_rows = static_cast<size_t>(std::ceil(height / row_height_)) + 2;
-        const size_t last_row = std::min(rows_, first_row + visible_rows);
-        const double now = now_seconds();
-
-        cr->set_source_rgb(0.08, 0.09, 0.10);
-        cr->paint();
-
-        cr->select_font_face("Monospace", Cairo::ToyFontFace::Slant::NORMAL, Cairo::ToyFontFace::Weight::NORMAL);
-        cr->set_font_size(font_size_);
-
-        for (size_t row = first_row; row < last_row; ++row) {
-            const double y = static_cast<double>(row * row_height_);
-            const size_t row_base = row * kBytesPerRow;
-
-            if ((row % 2) == 0) {
-                cr->set_source_rgba(1.0, 1.0, 1.0, 0.025);
-                cr->rectangle(0.0, y, width, row_height_);
-                cr->fill();
+    void wheelEvent(QWheelEvent *event) override {
+        QScrollBar *vscroll = verticalScrollBar();
+        if (vscroll) {
+            const int delta = event->angleDelta().y();
+            if (delta > 0) {
+                vscroll->triggerAction(QScrollBar::SliderPageStepSub);
+            } else {
+                vscroll->triggerAction(QScrollBar::SliderPageStepAdd);
             }
-
-            char addr[32];
-            std::snprintf(addr, sizeof(addr), "%08zx", row_base);
-            draw_text(cr, address_x_, y + baseline_y_, 0.74, 0.78, 0.82, addr);
-
-            for (size_t col = 0; col < kBytesPerRow; ++col) {
-                const size_t index = row_base + col;
-                if (index >= memory_size_) {
-                    break;
-                }
-
-                const double cell_x = hex_start_x_ + static_cast<double>(col * 3) * hex_cell_width_;
-                const double ascii_x = ascii_start_x_ + static_cast<double>(col) * ascii_cell_width_;
-                const bool selected = index == selected_index_;
-                const bool matched = match_mask_[index] != 0;
-                const double age = changed_at_[index] < 0.0 ? kFadeSeconds : (now - changed_at_[index]);
-                const double fade = std::clamp(1.0 - (age / kFadeSeconds), 0.0, 1.0);
-                const uint8_t value = byte_for_index(index);
-
-                if (fade > 0.0 || selected || matched) {
-                    double r = 0.14;
-                    double g = 0.14;
-                    double b = 0.16;
-                    double a = 0.0;
-
-                    if (fade > 0.0) {
-                        r = 0.96;
-                        g = 0.38;
-                        b = 0.14;
-                        a = 0.16 + 0.42 * fade;
-                    }
-                    if (matched) {
-                        r = 0.85;
-                        g = 0.72;
-                        b = 0.12;
-                        a = std::max(a, 0.24);
-                    }
-                    if (selected) {
-                        r = 0.22;
-                        g = 0.64;
-                        b = 1.0;
-                        a = std::max(a, 0.35);
-                    }
-
-                    cr->set_source_rgba(r, g, b, a);
-                    cr->rectangle(cell_x - 1.0, y + 1.5, hex_highlight_width_, row_height_ - 3.0);
-                    cr->fill();
-                    cr->rectangle(ascii_x - 1.0, y + 1.5, ascii_highlight_width_, row_height_ - 3.0);
-                    cr->fill();
-                }
-
-                char hex[4];
-                std::snprintf(hex, sizeof(hex), "%02X", value);
-                draw_text(cr, cell_x, y + baseline_y_, 0.93, 0.93, 0.94, hex);
-
-                char ascii[2] = { printable(value), '\0' };
-                draw_text(cr, ascii_x, y + baseline_y_, 0.80, 0.86, 0.89, ascii);
-            }
+            event->accept();
         }
     }
 
-    uint8_t byte_for_index(size_t index) const {
+    void resizeEvent(QResizeEvent *event) override {
+        QWidget::resizeEvent(event);
+        updateGeometry();
+    }
+
+private:
+    void onTimer() {
+        refreshVisibleBytes();
+    }
+
+private:
+    uint8_t byteForIndex(size_t index) const {
         if (index >= visible_begin_ && index < visible_end_) {
             return visible_cache_[index - visible_begin_];
         }
         return last_seen_[index];
     }
 
-    void draw_text(const Cairo::RefPtr<Cairo::Context> &cr, double x, double y, double r, double g, double b, const char *text) {
-        cr->set_source_rgb(r, g, b);
-        cr->move_to(x, y);
-        cr->show_text(text);
+    void drawText(QPainter &painter, double x, double y, const QColor &color, const char *text) {
+        painter.setPen(color);
+        painter.drawText(QPointF(x, y), text);
     }
 
     static char printable(uint8_t value) {
@@ -717,20 +624,35 @@ private:
         return std::chrono::duration<double>(now).count();
     }
 
-    SearchFormat current_search_format() const {
-        return format_combo_.get_active_row_number() == 0 ? SearchFormat::Hex : SearchFormat::Decimal;
-    }
-
-    EndianMode current_endian_mode() const {
-        return endian_combo_.get_active_row_number() == 0 ? EndianMode::Little : EndianMode::Big;
-    }
-
-    size_t current_search_width() const {
-        const auto text = width_combo_.get_active_text();
-        if (text.empty()) {
-            return 1;
+    void scroll_to_index(size_t index) {
+        QScrollBar *vscroll = verticalScrollBar();
+        if (!vscroll) return;
+        
+        const double row_top = static_cast<double>((index / kBytesPerRow) * row_height_);
+        const double row_bottom = row_top + row_height_;
+        const double view_top = static_cast<double>(vscroll->value());
+        const double view_bottom = view_top + vscroll->pageStep();
+        if (row_top < view_top) {
+            vscroll->setValue(static_cast<int>(row_top));
+        } else if (row_bottom > view_bottom) {
+            vscroll->setValue(static_cast<int>(row_bottom - vscroll->pageStep()));
         }
-        return static_cast<size_t>(std::strtoul(text.c_str(), nullptr, 10));
+    }
+
+    QScrollBar *verticalScrollBar() const {
+        QScrollArea *scroll_area = qobject_cast<QScrollArea *>(parent());
+        if (scroll_area) {
+            return scroll_area->verticalScrollBar();
+        }
+        return nullptr;
+    }
+
+    QWidget *viewport() {
+        QScrollArea *scroll_area = qobject_cast<QScrollArea *>(parent());
+        if (scroll_area) {
+            return scroll_area->viewport();
+        }
+        return this;
     }
 
     size_t memory_size_;
@@ -738,25 +660,7 @@ private:
     std::function<bool(size_t, const void *, size_t)> write_memory_;
     std::atomic<bool> &open_flag_;
 
-    Gtk::Box root_;
-    Gtk::Box main_panel_;
-    Gtk::Box side_panel_;
-    Gtk::Box search_nav_;
-    Gtk::CheckButton auto_refresh_;
-    Gtk::Button refresh_button_;
-    Gtk::ScrolledWindow scrolled_;
-    Gtk::DrawingArea area_;
-    Glib::RefPtr<Gtk::GestureClick> click_controller_;
-    Gtk::Entry search_entry_;
-    Gtk::ComboBoxText format_combo_;
-    Gtk::ComboBoxText width_combo_;
-    Gtk::ComboBoxText endian_combo_;
-    Gtk::Entry edit_entry_;
-    Gtk::Button apply_button_;
-    Gtk::Button prev_button_;
-    Gtk::Button next_button_;
-    Gtk::Label status_label_;
-    sigc::connection timer_;
+    QTimer *timer_;
 
     const size_t rows_;
     std::vector<uint8_t> last_seen_;
@@ -771,7 +675,6 @@ private:
     size_t active_match_index_ = 0;
 
     const double row_height_ = 18.0;
-    const double font_size_ = 11.0;
     const double baseline_y_ = 13.3;
     const double address_x_ = kAddressX;
     const double hex_cell_width_ = 6.8;
@@ -783,69 +686,309 @@ private:
     const double ascii_highlight_width_ = ascii_cell_width_ * 1.35;
 };
 
+class MemViewerWindow : public QMainWindow {
+public:
+    MemViewerWindow(
+        size_t memory_size,
+        std::function<bool(size_t, void *, size_t)> read_memory,
+        std::function<bool(size_t, const void *, size_t)> write_memory,
+        std::atomic<bool> &open_flag)
+        : open_flag_(open_flag) {
+        
+        setWindowTitle("Memory Viewer");
+        resize(900, 680);
+        setAttribute(Qt::WA_DeleteOnClose);
+
+        QWidget *central = new QWidget(this);
+        setCentralWidget(central);
+
+        QHBoxLayout *root_layout = new QHBoxLayout(central);
+        root_layout->setContentsMargins(8, 8, 8, 8);
+        root_layout->setSpacing(10);
+
+        QWidget *main_panel = new QWidget();
+        QVBoxLayout *main_layout = new QVBoxLayout(main_panel);
+        main_layout->setContentsMargins(0, 0, 0, 0);
+        main_layout->setSpacing(0);
+
+        scroll_area_ = new QScrollArea();
+        scroll_area_->setWidgetResizable(true);
+        scroll_area_->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+        scroll_area_->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+        main_layout->addWidget(scroll_area_);
+
+        QWidget *side_panel = new QWidget();
+        side_panel->setFixedWidth(180);
+        QVBoxLayout *side_layout = new QVBoxLayout(side_panel);
+        side_layout->setSpacing(8);
+
+        auto_refresh_ = new QCheckBox("Auto refresh");
+        auto_refresh_->setChecked(true);
+        
+        refresh_button_ = new QPushButton("Refresh");
+        connect(refresh_button_, &QPushButton::clicked, this, [this]() {
+            if (viewer_widget_) {
+                viewer_widget_->refreshVisibleBytes();
+            }
+        });
+
+        QFrame *refresh_frame = new QFrame();
+        refresh_frame->setFrameStyle(QFrame::Box | QFrame::Raised);
+        QVBoxLayout *refresh_layout = new QVBoxLayout(refresh_frame);
+        refresh_layout->setContentsMargins(8, 8, 8, 8);
+        refresh_layout->setSpacing(6);
+        refresh_layout->addWidget(auto_refresh_);
+        refresh_layout->addWidget(refresh_button_);
+        side_layout->addWidget(refresh_frame);
+
+        QFrame *search_frame = new QFrame();
+        search_frame->setFrameStyle(QFrame::Box | QFrame::Raised);
+        QVBoxLayout *search_layout = new QVBoxLayout(search_frame);
+        search_layout->setContentsMargins(8, 8, 8, 8);
+        search_layout->setSpacing(6);
+
+        search_layout->addWidget(new QLabel("Value"));
+        search_entry_ = new QLineEdit();
+        search_layout->addWidget(search_entry_);
+
+        search_layout->addWidget(new QLabel("Format"));
+        format_combo_ = new QComboBox();
+        format_combo_->addItem("Hex");
+        format_combo_->addItem("Decimal");
+        search_layout->addWidget(format_combo_);
+
+        search_layout->addWidget(new QLabel("Bytes"));
+        width_combo_ = new QComboBox();
+        width_combo_->addItem("1");
+        width_combo_->addItem("2");
+        width_combo_->addItem("4");
+        width_combo_->addItem("8");
+        search_layout->addWidget(width_combo_);
+
+        search_layout->addWidget(new QLabel("Endian"));
+        endian_combo_ = new QComboBox();
+        endian_combo_->addItem("Little");
+        endian_combo_->addItem("Big");
+        search_layout->addWidget(endian_combo_);
+
+        QHBoxLayout *search_nav = new QHBoxLayout();
+        prev_button_ = new QPushButton("Prev");
+        next_button_ = new QPushButton("Next");
+        search_nav->addWidget(prev_button_);
+        search_nav->addWidget(next_button_);
+        search_layout->addLayout(search_nav);
+
+        connect(search_entry_, &QLineEdit::returnPressed, this, [this]() {
+            rebuildSearch();
+        });
+        connect(format_combo_, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this]() {
+            rebuildSearch();
+        });
+        connect(width_combo_, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this]() {
+            rebuildSearch();
+        });
+        connect(endian_combo_, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this]() {
+            rebuildSearch();
+        });
+        connect(prev_button_, &QPushButton::clicked, this, [this]() {
+            if (viewer_widget_) {
+                viewer_widget_->navigateMatch(-1);
+            }
+        });
+        connect(next_button_, &QPushButton::clicked, this, [this]() {
+            if (viewer_widget_) {
+                viewer_widget_->navigateMatch(1);
+            }
+        });
+
+        side_layout->addWidget(search_frame);
+
+        QFrame *edit_frame = new QFrame();
+        edit_frame->setFrameStyle(QFrame::Box | QFrame::Raised);
+        QVBoxLayout *edit_layout = new QVBoxLayout(edit_frame);
+        edit_layout->setContentsMargins(8, 8, 8, 8);
+        edit_layout->setSpacing(6);
+
+        edit_layout->addWidget(new QLabel("Selected byte"));
+        edit_entry_ = new QLineEdit();
+        edit_entry_->setPlaceholderText("Selected byte: hex or decimal");
+        edit_layout->addWidget(edit_entry_);
+
+        apply_button_ = new QPushButton("Write byte");
+        connect(apply_button_, &QPushButton::clicked, this, [this]() {
+            applyEdit();
+        });
+        edit_layout->addWidget(apply_button_);
+
+        connect(edit_entry_, &QLineEdit::returnPressed, this, [this]() {
+            applyEdit();
+        });
+
+        side_layout->addWidget(edit_frame);
+
+        QFrame *status_frame = new QFrame();
+        status_frame->setFrameStyle(QFrame::Box | QFrame::Raised);
+        QVBoxLayout *status_layout = new QVBoxLayout(status_frame);
+        status_layout->setContentsMargins(8, 8, 8, 8);
+        status_layout->setSpacing(6);
+
+        status_label_ = new QLabel();
+        status_label_->setWordWrap(true);
+        status_layout->addWidget(status_label_);
+
+        side_layout->addWidget(status_frame);
+
+        side_layout->addStretch();
+
+        root_layout->addWidget(main_panel, 1);
+        root_layout->addWidget(side_panel);
+
+        viewer_widget_ = new MemViewerWidget(memory_size, read_memory, write_memory, open_flag, scroll_area_);
+        scroll_area_->setWidget(viewer_widget_);
+
+        viewer_widget_->onByteSelected = [this](size_t index, uint8_t value) {
+            updateStatus(index, value);
+            char text[8];
+            std::snprintf(text, sizeof(text), "%02X", value);
+            edit_entry_->setText(text);
+        };
+        viewer_widget_->onSearchStatusUpdated = [this]() {
+            updateStatus(std::numeric_limits<size_t>::max(), 0);
+        };
+
+        connect(auto_refresh_, &QCheckBox::toggled, viewer_widget_, [this](bool checked) {
+            if (viewer_widget_) {
+                viewer_widget_->setAutoRefresh(checked);
+            }
+        });
+
+        updateStatus(std::numeric_limits<size_t>::max(), 0);
+    }
+
+    ~MemViewerWindow() override {
+        open_flag_.store(false, std::memory_order_relaxed);
+    }
+
+private:
+    void rebuildSearch() {
+        if (!viewer_widget_) return;
+        
+        const std::string search_text = search_entry_->text().toStdString();
+        const SearchFormat format = format_combo_->currentIndex() == 0 ? SearchFormat::Hex : SearchFormat::Decimal;
+        const EndianMode endian = endian_combo_->currentIndex() == 0 ? EndianMode::Little : EndianMode::Big;
+        const size_t width = static_cast<size_t>(width_combo_->currentText().toULongLong());
+        
+        viewer_widget_->rebuildSearch(search_text, format, endian, width);
+    }
+
+    void applyEdit() {
+        if (!viewer_widget_) return;
+        
+        uint8_t value = 0;
+        const std::string text = edit_entry_->text().toStdString();
+        if (!parse_byte_value(text, value)) {
+            return;
+        }
+        viewer_widget_->applyEdit(value);
+    }
+
+    void updateStatus(size_t index, uint8_t value) {
+        if (!viewer_widget_) return;
+        
+        if (index >= viewer_widget_->getMemorySize()) {
+            std::ostringstream ss;
+            ss << "Buffer size: " << viewer_widget_->getMemorySize() << " bytes";
+            const size_t match_count = viewer_widget_->getMatchCount();
+            if (match_count > 0) {
+                ss << " | Matches: " << match_count;
+            }
+            status_label_->setText(QString::fromStdString(ss.str()));
+            return;
+        }
+
+        char text[256];
+        std::snprintf(
+            text,
+            sizeof(text),
+            "Selected: 0x%08zx | hex=%02X | dec=%u | Matches=%zu",
+            index,
+            value,
+            static_cast<unsigned>(value),
+            viewer_widget_->getMatchCount());
+        status_label_->setText(QString::fromLatin1(text));
+    }
+
+    std::atomic<bool> &open_flag_;
+    QScrollArea *scroll_area_;
+    MemViewerWidget *viewer_widget_;
+    QCheckBox *auto_refresh_;
+    QPushButton *refresh_button_;
+    QLineEdit *search_entry_;
+    QComboBox *format_combo_;
+    QComboBox *width_combo_;
+    QComboBox *endian_combo_;
+    QPushButton *prev_button_;
+    QPushButton *next_button_;
+    QLineEdit *edit_entry_;
+    QPushButton *apply_button_;
+    QLabel *status_label_;
+};
+
 }  // namespace
 
 int mem_viewer_run_gui(pid_t target_pid, uintptr_t target_address, size_t size) {
     prctl(PR_SET_PDEATHSIG, SIGTERM);
-    mem_viewer_debug_log("starting GUI target_pid=%ld address=0x%llx size=%zu",
+    mem_viewer_debug_log("starting Qt GUI target_pid=%ld address=0x%llx size=%zu",
         static_cast<long>(target_pid),
         static_cast<unsigned long long>(target_address),
         size);
 
     RemoteMemory memory(target_pid, target_address, size);
-    auto app = Gtk::Application::create("com.example.memviewer", Gio::Application::Flags::NON_UNIQUE);
-    mem_viewer_debug_log("Gtk::Application created");
+    
+    int argc = 1;
+    const char *argv[] = {"mem_viewer", nullptr};
+    QApplication app(argc, const_cast<char **>(argv));
+    
+    mem_viewer_debug_log("QApplication created");
     std::atomic<bool> open_flag{false};
-    std::unique_ptr<MemViewerWindow> window;
+    
+    auto *window = new MemViewerWindow(
+        memory.size(),
+        [&memory](size_t offset, void *buffer, size_t length) { return memory.read(offset, buffer, length); },
+        [&memory](size_t offset, const void *buffer, size_t length) { return memory.write(offset, buffer, length); },
+        open_flag);
+    
+    open_flag.store(true, std::memory_order_relaxed);
+    window->show();
+    mem_viewer_debug_log("window shown");
 
-    app->signal_activate().connect([&]() {
-        mem_viewer_debug_log("Gtk application activate");
-        if (!window) {
-            window = std::make_unique<MemViewerWindow>(
-                memory.size(),
-                [&memory](size_t offset, void *buffer, size_t length) { return memory.read(offset, buffer, length); },
-                [&memory](size_t offset, const void *buffer, size_t length) { return memory.write(offset, buffer, length); },
-                open_flag);
-            window->signal_hide().connect([&]() { app->quit(); });
-            app->add_window(*window);
-            mem_viewer_debug_log("window created and added to application");
-        }
-        open_flag.store(true, std::memory_order_relaxed);
-        window->present();
-        mem_viewer_debug_log("window presented");
-    });
-
-    mem_viewer_debug_log("entering Gtk::Application::run()");
-    const int rc = app->run();
-    mem_viewer_debug_log("Gtk::Application::run() returned rc=%d", rc);
+    const int rc = app.exec();
+    mem_viewer_debug_log("QApplication::exec() returned rc=%d", rc);
     return rc;
 }
 
 int mem_viewer_run_gui_shared(void *memory_ptr, size_t size) {
-    mem_viewer_debug_log("starting shared GUI memory=%p size=%zu", memory_ptr, size);
+    mem_viewer_debug_log("starting shared Qt GUI memory=%p size=%zu", memory_ptr, size);
 
     LocalMemory memory(memory_ptr, size);
-    auto app = Gtk::Application::create("com.example.memviewer.shared", Gio::Application::Flags::NON_UNIQUE);
+    
+    int argc = 1;
+    const char *argv[] = {"mem_viewer_shared", nullptr};
+    QApplication app(argc, const_cast<char **>(argv));
+    
     std::atomic<bool> open_flag{false};
-    std::unique_ptr<MemViewerWindow> window;
+    
+    auto *window = new MemViewerWindow(
+        memory.size(),
+        [&memory](size_t offset, void *buffer, size_t length) { return memory.read(offset, buffer, length); },
+        [&memory](size_t offset, const void *buffer, size_t length) { return memory.write(offset, buffer, length); },
+        open_flag);
+    
+    open_flag.store(true, std::memory_order_relaxed);
+    window->show();
+    mem_viewer_debug_log("shared window shown");
 
-    app->signal_activate().connect([&]() {
-        if (!window) {
-            window = std::make_unique<MemViewerWindow>(
-                memory.size(),
-                [&memory](size_t offset, void *buffer, size_t length) { return memory.read(offset, buffer, length); },
-                [&memory](size_t offset, const void *buffer, size_t length) { return memory.write(offset, buffer, length); },
-                open_flag);
-            window->signal_hide().connect([&]() { app->quit(); });
-            app->add_window(*window);
-            mem_viewer_debug_log("shared window created and added to application");
-        }
-        open_flag.store(true, std::memory_order_relaxed);
-        window->present();
-        mem_viewer_debug_log("shared window presented");
-    });
-
-    const int rc = app->run();
-    mem_viewer_debug_log("shared Gtk::Application::run() returned rc=%d", rc);
+    const int rc = app.exec();
+    mem_viewer_debug_log("shared QApplication::exec() returned rc=%d", rc);
     return rc;
 }
