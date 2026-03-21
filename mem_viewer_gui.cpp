@@ -6,6 +6,7 @@
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <cstdarg>
 #include <cctype>
 #include <cstdint>
 #include <cstdio>
@@ -21,6 +22,28 @@
 #include <vector>
 
 namespace {
+
+static bool mem_viewer_debug_enabled() {
+    static const bool enabled = []() {
+        const char *value = std::getenv("MEM_VIEWER_DEBUG");
+        return value != nullptr && value[0] != '\0' && std::strcmp(value, "0") != 0;
+    }();
+    return enabled;
+}
+
+static void mem_viewer_debug_log(const char *fmt, ...) {
+    if (!mem_viewer_debug_enabled()) {
+        return;
+    }
+
+    std::fprintf(stderr, "[mem_viewer_helper pid=%ld] ", static_cast<long>(getpid()));
+    va_list args;
+    va_start(args, fmt);
+    std::vfprintf(stderr, fmt, args);
+    va_end(args);
+    std::fprintf(stderr, "\n");
+    std::fflush(stderr);
+}
 
 constexpr size_t kBytesPerRow = 16;
 constexpr int kRefreshMs = 100;
@@ -119,6 +142,10 @@ public:
         struct iovec local = {buffer, bounded};
         struct iovec remote = {reinterpret_cast<void *>(address_ + offset), bounded};
         const ssize_t result = process_vm_readv(pid_, &local, 1, &remote, 1, 0);
+        if (result != static_cast<ssize_t>(bounded) && mem_viewer_debug_enabled()) {
+            mem_viewer_debug_log("process_vm_readv failed pid=%ld offset=%zu length=%zu result=%zd errno=%d (%s)",
+                static_cast<long>(pid_), offset, bounded, result, errno, std::strerror(errno));
+        }
         return result == static_cast<ssize_t>(bounded);
     }
 
@@ -130,6 +157,10 @@ public:
         struct iovec local = {const_cast<void *>(buffer), bounded};
         struct iovec remote = {reinterpret_cast<void *>(address_ + offset), bounded};
         const ssize_t result = process_vm_writev(pid_, &local, 1, &remote, 1, 0);
+        if (result != static_cast<ssize_t>(bounded) && mem_viewer_debug_enabled()) {
+            mem_viewer_debug_log("process_vm_writev failed pid=%ld offset=%zu length=%zu result=%zd errno=%d (%s)",
+                static_cast<long>(pid_), offset, bounded, result, errno, std::strerror(errno));
+        }
         return result == static_cast<ssize_t>(bounded);
     }
 
@@ -166,6 +197,10 @@ public:
           last_seen_(memory_.size(), 0),
           changed_at_(memory_.size(), -1.0),
           match_mask_(memory_.size(), 0) {
+        mem_viewer_debug_log("creating window for target_pid=%ld address=0x%llx size=%zu",
+            static_cast<long>(target_pid),
+            static_cast<unsigned long long>(target_address),
+            size);
         set_title("Memory Viewer");
         set_default_size(900, 680);
         set_hide_on_close(true);
@@ -291,6 +326,7 @@ public:
 
 private:
     bool on_close_request() {
+        mem_viewer_debug_log("window close request");
         timer_.disconnect();
         open_flag_.store(false, std::memory_order_relaxed);
         hide();
@@ -697,20 +733,31 @@ private:
 
 int mem_viewer_run_gui(pid_t target_pid, uintptr_t target_address, size_t size) {
     prctl(PR_SET_PDEATHSIG, SIGTERM);
+    mem_viewer_debug_log("starting GUI target_pid=%ld address=0x%llx size=%zu",
+        static_cast<long>(target_pid),
+        static_cast<unsigned long long>(target_address),
+        size);
 
     auto app = Gtk::Application::create("com.example.memviewer", Gio::Application::Flags::NON_UNIQUE);
+    mem_viewer_debug_log("Gtk::Application created");
     std::atomic<bool> open_flag{false};
     std::unique_ptr<MemViewerWindow> window;
 
     app->signal_activate().connect([&]() {
+        mem_viewer_debug_log("Gtk application activate");
         if (!window) {
             window = std::make_unique<MemViewerWindow>(target_pid, target_address, size, open_flag);
             window->signal_hide().connect([&]() { app->quit(); });
             app->add_window(*window);
+            mem_viewer_debug_log("window created and added to application");
         }
         open_flag.store(true, std::memory_order_relaxed);
         window->present();
+        mem_viewer_debug_log("window presented");
     });
 
-    return app->run();
+    mem_viewer_debug_log("entering Gtk::Application::run()");
+    const int rc = app->run();
+    mem_viewer_debug_log("Gtk::Application::run() returned rc=%d", rc);
+    return rc;
 }
