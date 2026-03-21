@@ -1,0 +1,8 @@
+*.o
+*.so
+test_c
+test_sdl
+test_file
+*~
+*.swp
+*.tmp
