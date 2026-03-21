@@ -1176,14 +1176,24 @@ private:
         QMenu *file_menu = menuBar()->addMenu("&File");
         QAction *select_annotations = file_menu->addAction("Select Annotation File...");
         connect(select_annotations, &QAction::triggered, this, [this]() {
-            const QString path = QFileDialog::getSaveFileName(
-                this,
-                QStringLiteral("Select Annotation File"),
-                annotation_store_.hasFilePath() ? annotation_store_.filePath() : QString(),
-                QStringLiteral("JSON Files (*.json);;All Files (*)"));
-            if (path.isEmpty()) {
+            QFileDialog dialog(this, QStringLiteral("Select Annotation File"));
+            dialog.setAcceptMode(QFileDialog::AcceptSave);
+            dialog.setFileMode(QFileDialog::AnyFile);
+            dialog.setNameFilter(QStringLiteral("JSON Files (*.json);;All Files (*)"));
+            dialog.setOption(QFileDialog::DontUseNativeDialog, true);
+            if (annotation_store_.hasFilePath()) {
+                dialog.selectFile(annotation_store_.filePath());
+            }
+
+            if (dialog.exec() != QDialog::Accepted) {
                 return;
             }
+
+            const QStringList selected_files = dialog.selectedFiles();
+            if (selected_files.isEmpty()) {
+                return;
+            }
+            const QString path = selected_files.front();
 
             QString error_message;
             if (!annotation_store_.selectFile(path, &error_message)) {
