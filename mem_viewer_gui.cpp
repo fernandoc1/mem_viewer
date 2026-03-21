@@ -10,6 +10,8 @@
 #include <QPushButton>
 #include <QScrollArea>
 #include <QScrollBar>
+#include <QStyle>
+#include <QStyleOptionSlider>
 #include <QTimer>
 #include <QVBoxLayout>
 #include <QWidget>
@@ -421,6 +423,59 @@ private:
 
     QString file_path_;
     std::vector<AnnotationEntry> annotations_;
+};
+
+class NoteScrollBar : public QScrollBar {
+public:
+    explicit NoteScrollBar(Qt::Orientation orientation, QWidget *parent = nullptr)
+        : QScrollBar(orientation, parent) {}
+
+    void setMemorySize(size_t memory_size) {
+        memory_size_ = memory_size;
+        update();
+    }
+
+    void setAnnotatedPositions(const std::set<size_t> &positions) {
+        annotated_positions_ = positions;
+        update();
+    }
+
+protected:
+    void paintEvent(QPaintEvent *event) override {
+        QScrollBar::paintEvent(event);
+
+        if (orientation() != Qt::Vertical || memory_size_ == 0 || annotated_positions_.empty()) {
+            return;
+        }
+
+        QStyleOptionSlider option;
+        initStyleOption(&option);
+        const QRect groove = style()->subControlRect(QStyle::CC_ScrollBar, &option, QStyle::SC_ScrollBarGroove, this);
+        if (!groove.isValid() || groove.height() <= 0) {
+            return;
+        }
+
+        QPainter painter(this);
+        painter.setRenderHint(QPainter::Antialiasing, false);
+        painter.setPen(Qt::NoPen);
+        painter.setBrush(QColor(0x72, 0xE6, 0x7A, 220));
+
+        int previous_y = std::numeric_limits<int>::min();
+        for (size_t position : annotated_positions_) {
+            const double ratio = static_cast<double>(position) / static_cast<double>(memory_size_);
+            int y = groove.top() + static_cast<int>(std::floor(ratio * static_cast<double>(groove.height() - 1)));
+            y = std::clamp(y, groove.top(), groove.bottom());
+            if (y == previous_y) {
+                continue;
+            }
+            previous_y = y;
+            painter.drawRect(QRect(groove.left() + 1, y, std::max(2, groove.width() - 2), 2));
+        }
+    }
+
+private:
+    size_t memory_size_ = 0;
+    std::set<size_t> annotated_positions_;
 };
 
 class RemoteMemory {
@@ -1154,6 +1209,9 @@ public:
         scroll_area_->setWidgetResizable(true);
         scroll_area_->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
         scroll_area_->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+        note_scroll_bar_ = new NoteScrollBar(Qt::Vertical, scroll_area_);
+        note_scroll_bar_->setMemorySize(memory_size);
+        scroll_area_->setVerticalScrollBar(note_scroll_bar_);
         main_layout->addWidget(scroll_area_);
 
         QWidget *side_panel = new QWidget();
@@ -1498,10 +1556,13 @@ private:
     }
 
     void refreshAnnotationHighlights() {
-        if (!viewer_widget_) {
-            return;
+        const std::set<size_t> annotated_positions = annotation_store_.annotatedPositions();
+        if (viewer_widget_) {
+            viewer_widget_->setAnnotatedPositions(annotated_positions);
         }
-        viewer_widget_->setAnnotatedPositions(annotation_store_.annotatedPositions());
+        if (note_scroll_bar_) {
+            note_scroll_bar_->setAnnotatedPositions(annotated_positions);
+        }
     }
 
     void updateStatus(size_t index = std::numeric_limits<size_t>::max(), uint8_t value = 0) {
@@ -1548,6 +1609,7 @@ private:
     std::atomic<bool> &open_flag_;
     QScrollArea *scroll_area_;
     MemViewerWidget *viewer_widget_;
+    NoteScrollBar *note_scroll_bar_;
     QCheckBox *auto_refresh_;
     QPushButton *refresh_button_;
     QLineEdit *search_entry_;
