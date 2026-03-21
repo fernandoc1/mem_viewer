@@ -14,6 +14,9 @@ MemViewer *mem_viewer_open_shared(void *memory, size_t size);
 void mem_viewer_destroy(MemViewer *viewer);
 int mem_viewer_is_open(MemViewer *viewer);
 
+void *mem_viewer_shared_malloc(size_t size);
+void mem_viewer_shared_free(void *ptr, size_t size);
+
 #ifdef __cplusplus
 }
 #endif

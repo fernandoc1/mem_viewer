@@ -24,9 +24,9 @@ int main(int argc, char **argv) {
     int wait_mode = 0;
     int updater_pid = -1;
 
-    uint8_t *buffer = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
-    if (buffer == MAP_FAILED) {
-        perror("mmap");
+    uint8_t *buffer = (uint8_t *)mem_viewer_shared_malloc(size);
+    if (!buffer) {
+        fprintf(stderr, "mem_viewer_shared_malloc failed\n");
         return 1;
     }
 
@@ -43,7 +43,7 @@ int main(int argc, char **argv) {
     updater_pid = fork();
     if (updater_pid < 0) {
         perror("fork");
-        munmap(buffer, size);
+        mem_viewer_shared_free(buffer, size);
         return 1;
     }
 
@@ -61,7 +61,7 @@ int main(int argc, char **argv) {
         fprintf(stderr, "mem_viewer_open_shared failed\n");
         kill(updater_pid, SIGTERM);
         waitpid(updater_pid, NULL, 0);
-        munmap(buffer, size);
+        mem_viewer_shared_free(buffer, size);
         return 1;
     }
 
@@ -80,6 +80,6 @@ int main(int argc, char **argv) {
     mem_viewer_destroy(viewer);
     kill(updater_pid, SIGTERM);
     waitpid(updater_pid, NULL, 0);
-    munmap(buffer, size);
+    mem_viewer_shared_free(buffer, size);
     return 0;
 }

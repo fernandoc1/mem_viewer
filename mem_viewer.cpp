@@ -14,6 +14,8 @@
 #include <string>
 #include <sys/types.h>
 #include <sys/wait.h>
+#include <sys/mman.h>
+#include <sys/syscall.h>
 #include <unistd.h>
 #include <vector>
 
@@ -194,4 +196,43 @@ extern "C" int mem_viewer_is_open(MemViewer *viewer) {
         return 0;
     }
     return child_is_alive(viewer->process->pid) ? 1 : 0;
+}
+
+#ifndef MFD_CLOEXEC
+#define MFD_CLOEXEC 0x0001U
+#endif
+
+extern "C" void *mem_viewer_shared_malloc(size_t size) {
+    if (size == 0) return nullptr;
+
+    // Use memfd_create to create an anonymous file in RAM
+    int fd = (int)syscall(SYS_memfd_create, "mem_viewer_shared", MFD_CLOEXEC);
+    if (fd < 0) {
+        mem_viewer_debug_log("memfd_create failed: %s", std::strerror(errno));
+        return nullptr;
+    }
+
+    // Set the size of the shared memory region
+    if (ftruncate(fd, size) < 0) {
+        mem_viewer_debug_log("ftruncate failed: %s", std::strerror(errno));
+        close(fd);
+        return nullptr;
+    }
+
+    // Map the shared memory region into the process's address space
+    void *ptr = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    if (ptr == MAP_FAILED) {
+        mem_viewer_debug_log("mmap failed: %s", std::strerror(errno));
+        close(fd);
+        return nullptr;
+    }
+
+    // Once mapped, the fd can be closed, but the mapping remains
+    close(fd);
+    return ptr;
+}
+
+extern "C" void mem_viewer_shared_free(void *ptr, size_t size) {
+    if (ptr == nullptr || size == 0) return;
+    munmap(ptr, size);
 }
