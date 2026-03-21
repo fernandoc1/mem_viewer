@@ -567,9 +567,7 @@ protected:
             return;
         }
 
-        QScrollBar *vscroll = verticalScrollBar();
-        const int scroll_y = vscroll ? vscroll->value() : 0;
-        const double absolute_y = event->position().y() + scroll_y;
+        const double absolute_y = event->position().y();
         const size_t row = static_cast<size_t>(absolute_y / row_height_);
         if (row >= rows_) {
             return;
