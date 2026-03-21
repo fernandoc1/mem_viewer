@@ -49,6 +49,11 @@ constexpr size_t kBytesPerRow = 16;
 constexpr int kRefreshMs = 100;
 constexpr double kFadeSeconds = 1.6;
 constexpr size_t kSearchChunkBytes = 64 * 1024;
+constexpr double kAddressX = 10.0;
+constexpr double kAddressChars = 8.0;
+constexpr double kAddressCharWidth = 7.0;
+constexpr double kGapAddressToHex = 6.0;
+constexpr double kGapHexToAscii = 6.0;
 
 enum class SearchFormat {
     Hex,
@@ -215,7 +220,7 @@ public:
         main_panel_.set_vexpand(true);
         root_.append(main_panel_);
 
-        side_panel_.set_size_request(220, -1);
+        side_panel_.set_size_request(180, -1);
         root_.append(side_panel_);
 
         auto_refresh_.set_active(true);
@@ -297,7 +302,7 @@ public:
         area_.set_draw_func(sigc::mem_fun(*this, &MemViewerWindow::on_draw));
         area_.set_hexpand(true);
         area_.set_vexpand(true);
-        area_.set_content_width(760);
+        area_.set_content_width(static_cast<int>(content_width_));
         area_.set_content_height(static_cast<int>(rows_ * row_height_));
         area_.add_controller(click_controller_);
 
@@ -588,7 +593,7 @@ private:
 
             char addr[32];
             std::snprintf(addr, sizeof(addr), "%08zx", row_base);
-            draw_text(cr, 16.0, y + baseline_y_, 0.74, 0.78, 0.82, addr);
+            draw_text(cr, address_x_, y + baseline_y_, 0.74, 0.78, 0.82, addr);
 
             for (size_t col = 0; col < kBytesPerRow; ++col) {
                 const size_t index = row_base + col;
@@ -630,7 +635,7 @@ private:
                     }
 
                     cr->set_source_rgba(r, g, b, a);
-                    cr->rectangle(cell_x - 3.0, y + 2.0, hex_cell_width_ * 2.2, row_height_ - 4.0);
+                    cr->rectangle(cell_x - 2.0, y + 2.0, hex_cell_width_ * 1.9, row_height_ - 4.0);
                     cr->fill();
                     cr->rectangle(ascii_x - 2.0, y + 2.0, ascii_cell_width_, row_height_ - 4.0);
                     cr->fill();
@@ -720,13 +725,15 @@ private:
     size_t selected_index_ = std::numeric_limits<size_t>::max();
     size_t active_match_index_ = 0;
 
-    const double row_height_ = 20.0;
-    const double font_size_ = 12.0;
-    const double baseline_y_ = 14.5;
-    const double hex_start_x_ = 84.0;
-    const double ascii_start_x_ = 500.0;
-    const double hex_cell_width_ = 8.6;
-    const double ascii_cell_width_ = 8.2;
+    const double row_height_ = 18.0;
+    const double font_size_ = 11.0;
+    const double baseline_y_ = 13.3;
+    const double address_x_ = kAddressX;
+    const double hex_cell_width_ = 6.8;
+    const double ascii_cell_width_ = 6.6;
+    const double hex_start_x_ = address_x_ + kAddressChars * kAddressCharWidth + kGapAddressToHex;
+    const double ascii_start_x_ = hex_start_x_ + (kBytesPerRow * 3 - 1) * hex_cell_width_ + kGapHexToAscii;
+    const double content_width_ = ascii_start_x_ + kBytesPerRow * ascii_cell_width_ + 4.0;
 };
 
 }  // namespace

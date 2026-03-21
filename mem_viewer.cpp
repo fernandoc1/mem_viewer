@@ -7,11 +7,14 @@
 #include <cstdio>
 #include <cstring>
 #include <dlfcn.h>
+#include <errno.h>
 #include <limits.h>
+#include <string_view>
 #include <string>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#include <vector>
 
 namespace {
 
@@ -56,17 +59,43 @@ static bool child_is_alive(pid_t pid) {
 }
 
 static std::string helper_path() {
-    Dl_info info{};
-    if (dladdr(reinterpret_cast<void *>(&mem_viewer_open), &info) == 0 || info.dli_fname == nullptr) {
-        return "mem_viewer_helper";
+    const char *env_helper = std::getenv("MEM_VIEWER_HELPER");
+    if (env_helper != nullptr && env_helper[0] != '\0') {
+        return env_helper;
     }
 
-    std::string path(info.dli_fname);
-    const size_t slash = path.find_last_of('/');
-    if (slash == std::string::npos) {
-        return "mem_viewer_helper";
+    std::vector<std::string> candidates;
+
+    Dl_info info{};
+    if (dladdr(reinterpret_cast<void *>(&mem_viewer_open), &info) != 0 && info.dli_fname != nullptr) {
+        std::string path(info.dli_fname);
+        const size_t slash = path.find_last_of('/');
+        if (slash != std::string::npos) {
+            candidates.push_back(path.substr(0, slash + 1) + "mem_viewer_helper");
+        }
     }
-    return path.substr(0, slash + 1) + "mem_viewer_helper";
+
+    char exe_path[PATH_MAX];
+    const ssize_t exe_len = readlink("/proc/self/exe", exe_path, sizeof(exe_path) - 1);
+    if (exe_len > 0) {
+        exe_path[exe_len] = '\0';
+        std::string path(exe_path);
+        const size_t slash = path.find_last_of('/');
+        if (slash != std::string::npos) {
+            candidates.push_back(path.substr(0, slash + 1) + "mem_viewer_helper");
+        }
+    }
+
+    candidates.emplace_back("./mem_viewer_helper");
+    candidates.emplace_back("mem_viewer_helper");
+
+    for (const auto &candidate : candidates) {
+        if (access(candidate.c_str(), X_OK) == 0) {
+            return candidate;
+        }
+    }
+
+    return candidates.empty() ? "mem_viewer_helper" : candidates.front();
 }
 
 }  // namespace
