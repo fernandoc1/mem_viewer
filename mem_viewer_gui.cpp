@@ -1341,8 +1341,32 @@ public:
 private:
     void createMenus() {
         QMenu *file_menu = menuBar()->addMenu("&File");
-        QAction *select_annotations = file_menu->addAction("Select Annotation File...");
-        connect(select_annotations, &QAction::triggered, this, [this]() {
+
+        QAction *load_annotations = file_menu->addAction("Load Notes File...");
+        connect(load_annotations, &QAction::triggered, this, [this]() {
+            QFileDialog dialog(this, QStringLiteral("Load Notes File"));
+            dialog.setAcceptMode(QFileDialog::AcceptOpen);
+            dialog.setFileMode(QFileDialog::ExistingFile);
+            dialog.setNameFilter(QStringLiteral("JSON Files (*.json);;All Files (*)"));
+            dialog.setOption(QFileDialog::DontUseNativeDialog, true);
+            if (annotation_store_.hasFilePath()) {
+                dialog.selectFile(annotation_store_.filePath());
+            }
+
+            if (dialog.exec() != QDialog::Accepted) {
+                return;
+            }
+
+            const QStringList selected_files = dialog.selectedFiles();
+            if (selected_files.isEmpty()) {
+                return;
+            }
+
+            selectAnnotationFile(selected_files.front());
+        });
+
+        QAction *create_annotations = file_menu->addAction("New Notes File...");
+        connect(create_annotations, &QAction::triggered, this, [this]() {
             QFileDialog dialog(this, QStringLiteral("Select Annotation File"));
             dialog.setAcceptMode(QFileDialog::AcceptSave);
             dialog.setFileMode(QFileDialog::AnyFile);
@@ -1360,18 +1384,20 @@ private:
             if (selected_files.isEmpty()) {
                 return;
             }
-            const QString path = selected_files.front();
-
-            QString error_message;
-            if (!annotation_store_.selectFile(path, &error_message)) {
-                QMessageBox::warning(this, QStringLiteral("Annotations"), error_message);
-                return;
-            }
-
-            refreshAnnotationHighlights();
-            updateAnnotationUi();
-            updateStatus();
+            selectAnnotationFile(selected_files.front());
         });
+    }
+
+    void selectAnnotationFile(const QString &path) {
+        QString error_message;
+        if (!annotation_store_.selectFile(path, &error_message)) {
+            QMessageBox::warning(this, QStringLiteral("Annotations"), error_message);
+            return;
+        }
+
+        refreshAnnotationHighlights();
+        updateAnnotationUi();
+        updateStatus();
     }
 
     void rebuildSearch() {
