@@ -24,6 +24,7 @@
 #include <QMenuBar>
 #include <QMessageBox>
 #include <QMouseEvent>
+#include <QSignalBlocker>
 #include <QTextEdit>
 #include <QWheelEvent>
 #include <QResizeEvent>
@@ -45,6 +46,7 @@
 #include <limits>
 #include <set>
 #include <memory>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -468,6 +470,7 @@ public:
         ascii_highlight_width_ = ascii_cell_width_ * 1.2;
 
         setFocusPolicy(Qt::StrongFocus);
+        setMouseTracking(true);
         setMinimumWidth(static_cast<int>(content_width_));
         setMinimumHeight(static_cast<int>(rows_ * row_height_));
         
@@ -760,36 +763,46 @@ protected:
             return;
         }
 
-        const double absolute_y = event->position().y();
-        const size_t row = static_cast<size_t>(absolute_y / row_height_);
-        if (row >= rows_) {
-            return;
-        }
-
-        const double hex_x = event->position().x() - hex_start_x_;
-        if (hex_x < -2.0) {
-            return;
-        }
-
-        const int cell = static_cast<int>((hex_x + 2.0) / hex_cell_width_);
-        const int byte_in_row = cell / 3;
-        if (byte_in_row < 0 || byte_in_row >= static_cast<int>(kBytesPerRow)) {
-            return;
-        }
-
-        const size_t index = row * kBytesPerRow + static_cast<size_t>(byte_in_row);
-        if (index >= memory_size_) {
+        const std::optional<size_t> index = indexForPosition(event->position());
+        if (!index.has_value()) {
             return;
         }
 
         const Qt::KeyboardModifiers modifiers = event->modifiers();
         if ((modifiers & Qt::ShiftModifier) != 0 && selection_anchor_ < memory_size_) {
-            selectRange(selection_anchor_, index, (modifiers & Qt::ControlModifier) != 0);
-        } else if ((modifiers & Qt::ControlModifier) != 0) {
-            toggleSelection(index);
+            selection_drag_anchor_ = selection_anchor_;
+            drag_selecting_ = true;
+            setRangeSelection(selection_anchor_, *index);
         } else {
-            setSelectedIndex(index);
+            selection_drag_anchor_ = *index;
+            drag_selecting_ = true;
+            setSelectedIndex(*index);
         }
+
+        event->accept();
+    }
+
+    void mouseMoveEvent(QMouseEvent *event) override {
+        if (!drag_selecting_ || (event->buttons() & Qt::LeftButton) == 0) {
+            return;
+        }
+
+        const std::optional<size_t> index = indexForPosition(event->position());
+        if (!index.has_value()) {
+            return;
+        }
+
+        setRangeSelection(selection_drag_anchor_, *index);
+        event->accept();
+    }
+
+    void mouseReleaseEvent(QMouseEvent *event) override {
+        if (event->button() == Qt::LeftButton) {
+            drag_selecting_ = false;
+            event->accept();
+            return;
+        }
+        QWidget::mouseReleaseEvent(event);
     }
 
     void wheelEvent(QWheelEvent *event) override {
@@ -858,6 +871,58 @@ private:
         }
     }
 
+    std::optional<size_t> indexForPosition(const QPointF &position) const {
+        if (position.y() < 0.0) {
+            return std::nullopt;
+        }
+
+        const size_t row = static_cast<size_t>(position.y() / row_height_);
+        if (row >= rows_) {
+            return std::nullopt;
+        }
+
+        auto index_for_column = [&](double x, double start_x, double slot_width, double active_width, int columns_per_byte)
+            -> std::optional<size_t> {
+            const double local_x = x - start_x;
+            if (local_x < 0.0) {
+                return std::nullopt;
+            }
+
+            const int slot = static_cast<int>(local_x / slot_width);
+            if (slot < 0) {
+                return std::nullopt;
+            }
+
+            const int byte_in_row = slot / columns_per_byte;
+            if (byte_in_row < 0 || byte_in_row >= static_cast<int>(kBytesPerRow)) {
+                return std::nullopt;
+            }
+
+            const double slot_offset = std::fmod(local_x, slot_width);
+            if (slot_offset > active_width) {
+                return std::nullopt;
+            }
+
+            const size_t index = row * kBytesPerRow + static_cast<size_t>(byte_in_row);
+            if (index >= memory_size_) {
+                return std::nullopt;
+            }
+            return index;
+        };
+
+        if (const std::optional<size_t> hex_index =
+                index_for_column(position.x(), hex_start_x_ - 2.0, hex_cell_width_, hex_highlight_width_, 3)) {
+            return hex_index;
+        }
+
+        if (const std::optional<size_t> ascii_index =
+                index_for_column(position.x(), ascii_start_x_ - 1.0, ascii_cell_width_, ascii_highlight_width_, 1)) {
+            return ascii_index;
+        }
+
+        return std::nullopt;
+    }
+
     QScrollBar *verticalScrollBar() const {
         QWidget *p = parentWidget();
         while (p) {
@@ -897,7 +962,9 @@ private:
     size_t visible_end_ = 0;
     size_t active_match_index_ = 0;
     size_t selection_anchor_ = std::numeric_limits<size_t>::max();
+    size_t selection_drag_anchor_ = std::numeric_limits<size_t>::max();
     std::vector<size_t> selected_indices_;
+    bool drag_selecting_ = false;
 
     QFont font_;
     double char_width_;
@@ -925,35 +992,18 @@ private:
         notifySelectionChanged();
     }
 
-    void toggleSelection(size_t index) {
-        if (selection_mask_[index] != 0) {
-            selection_mask_[index] = 0;
-            selected_indices_.erase(std::remove(selected_indices_.begin(), selected_indices_.end(), index), selected_indices_.end());
-        } else {
-            selection_mask_[index] = 1;
-            selected_indices_.push_back(index);
-        }
-        std::sort(selected_indices_.begin(), selected_indices_.end());
-        selection_anchor_ = index;
-        notifySelectionChanged();
-        update();
-    }
-
-    void selectRange(size_t first, size_t last, bool additive) {
-        if (!additive) {
-            clearSelection();
-        }
+    void setRangeSelection(size_t first, size_t last) {
+        clearSelection();
         const size_t begin = std::min(first, last);
         const size_t end = std::max(first, last);
         for (size_t index = begin; index <= end; ++index) {
-            if (index >= memory_size_ || selection_mask_[index] != 0) {
-                continue;
+            if (index >= memory_size_) {
+                break;
             }
             selection_mask_[index] = 1;
             selected_indices_.push_back(index);
         }
-        std::sort(selected_indices_.begin(), selected_indices_.end());
-        selection_anchor_ = last;
+        selection_anchor_ = first;
         notifySelectionChanged();
         update();
     }
