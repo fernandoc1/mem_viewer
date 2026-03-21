@@ -177,7 +177,7 @@ public:
         area_.set_draw_func(sigc::mem_fun(*this, &MemViewerWindow::on_draw));
         area_.set_hexpand(true);
         area_.set_vexpand(true);
-        area_.set_content_width(1200);
+        area_.set_content_width(1400);
         area_.set_content_height(static_cast<int>(rows_ * row_height_));
         area_.add_controller(click_controller_);
 
@@ -573,7 +573,7 @@ private:
     const double font_size_ = 14.0;
     const double baseline_y_ = 17.0;
     const double hex_start_x_ = 130.0;
-    const double ascii_start_x_ = 710.0;
+    const double ascii_start_x_ = 790.0;
     const double hex_cell_width_ = 13.0;
     const double ascii_cell_width_ = 12.0;
 };
