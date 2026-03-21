@@ -635,9 +635,9 @@ private:
                     }
 
                     cr->set_source_rgba(r, g, b, a);
-                    cr->rectangle(cell_x - 2.0, y + 2.0, hex_cell_width_ * 1.9, row_height_ - 4.0);
+                    cr->rectangle(cell_x - 1.0, y + 1.5, hex_highlight_width_, row_height_ - 3.0);
                     cr->fill();
-                    cr->rectangle(ascii_x - 2.0, y + 2.0, ascii_cell_width_, row_height_ - 4.0);
+                    cr->rectangle(ascii_x - 1.0, y + 1.5, ascii_highlight_width_, row_height_ - 3.0);
                     cr->fill();
                 }
 
@@ -734,6 +734,8 @@ private:
     const double hex_start_x_ = address_x_ + kAddressChars * kAddressCharWidth + kGapAddressToHex;
     const double ascii_start_x_ = hex_start_x_ + (kBytesPerRow * 3 - 1) * hex_cell_width_ + kGapHexToAscii;
     const double content_width_ = ascii_start_x_ + kBytesPerRow * ascii_cell_width_ + 4.0;
+    const double hex_highlight_width_ = hex_cell_width_ * 1.55;
+    const double ascii_highlight_width_ = ascii_cell_width_ * 1.15;
 };
 
 }  // namespace
