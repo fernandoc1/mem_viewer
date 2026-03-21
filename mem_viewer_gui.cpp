@@ -327,6 +327,14 @@ public:
         return save(error_message);
     }
 
+    std::set<size_t> annotatedPositions() const {
+        std::set<size_t> positions;
+        for (const AnnotationEntry &entry : annotations_) {
+            positions.insert(entry.positions.begin(), entry.positions.end());
+        }
+        return positions;
+    }
+
 private:
     static std::vector<size_t> normalizePositions(const std::vector<size_t> &positions) {
         std::set<size_t> unique_positions(positions.begin(), positions.end());
@@ -525,6 +533,7 @@ public:
           last_seen_(memory_size_, 0),
           changed_at_(memory_size_, -1.0),
           match_mask_(memory_size_, 0),
+          annotation_mask_(memory_size_, 0),
           selection_mask_(memory_size_, 0),
           font_("Monospace", 11) {
         
@@ -749,6 +758,16 @@ public:
         refreshVisibleBytes();
     }
 
+    void setAnnotatedPositions(const std::set<size_t> &positions) {
+        std::fill(annotation_mask_.begin(), annotation_mask_.end(), 0);
+        for (size_t index : positions) {
+            if (index < annotation_mask_.size()) {
+                annotation_mask_[index] = 1;
+            }
+        }
+        update();
+    }
+
     std::function<void(const std::vector<size_t> &)> onSelectionChanged;
     std::function<void()> onSearchStatusUpdated;
 
@@ -790,6 +809,7 @@ protected:
                 const double cell_x = hex_start_x_ + static_cast<double>(col * 3) * hex_cell_width_;
                 const double ascii_x = ascii_start_x_ + static_cast<double>(col) * ascii_cell_width_;
                 const bool selected = selection_mask_[index] != 0;
+                const bool annotated = annotation_mask_[index] != 0;
                 const bool matched = match_mask_[index] != 0;
                 const double age = changed_at_[index] < 0.0 ? kFadeSeconds : (now - changed_at_[index]);
                 const double fade = std::clamp(1.0 - (age / kFadeSeconds), 0.0, 1.0);
@@ -828,10 +848,20 @@ protected:
 
                 char hex[4];
                 std::snprintf(hex, sizeof(hex), "%02X", value);
-                drawText(painter, cell_x, y + baseline_y_, QColor(0xEE, 0xEE, 0xEF), hex);
+                drawText(
+                    painter,
+                    cell_x,
+                    y + baseline_y_,
+                    annotated ? QColor(0x72, 0xE6, 0x7A) : QColor(0xEE, 0xEE, 0xEF),
+                    hex);
 
                 char ascii[2] = { printable(value), '\0' };
-                drawText(painter, ascii_x, y + baseline_y_, QColor(0xCD, 0xDB, 0xE2), ascii);
+                drawText(
+                    painter,
+                    ascii_x,
+                    y + baseline_y_,
+                    annotated ? QColor(0x72, 0xE6, 0x7A) : QColor(0xCD, 0xDB, 0xE2),
+                    ascii);
             }
         }
     }
@@ -1032,6 +1062,7 @@ private:
     std::vector<uint8_t> last_seen_;
     std::vector<double> changed_at_;
     std::vector<uint8_t> match_mask_;
+    std::vector<uint8_t> annotation_mask_;
     std::vector<uint8_t> selection_mask_;
     std::vector<size_t> matches_;
     std::vector<uint8_t> visible_cache_;
@@ -1298,6 +1329,7 @@ public:
             clearSelectedAnnotations();
         });
 
+        refreshAnnotationHighlights();
         updateStatus(std::numeric_limits<size_t>::max(), 0);
         updateAnnotationUi();
     }
@@ -1336,6 +1368,7 @@ private:
                 return;
             }
 
+            refreshAnnotationHighlights();
             updateAnnotationUi();
             updateStatus();
         });
@@ -1418,6 +1451,7 @@ private:
             return;
         }
         active_annotation_ = annotation_store_.resolveForSelection(current_selection_);
+        refreshAnnotationHighlights();
         updateStatus();
     }
 
@@ -1432,8 +1466,16 @@ private:
             return;
         }
 
+        refreshAnnotationHighlights();
         updateAnnotationUi();
         updateStatus();
+    }
+
+    void refreshAnnotationHighlights() {
+        if (!viewer_widget_) {
+            return;
+        }
+        viewer_widget_->setAnnotatedPositions(annotation_store_.annotatedPositions());
     }
 
     void updateStatus(size_t index = std::numeric_limits<size_t>::max(), uint8_t value = 0) {
