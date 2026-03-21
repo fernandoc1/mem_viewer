@@ -7,8 +7,16 @@
 #include <vector>
 
 int main() {
+    std::vector<uint8_t> buffer(256, 0);
+    MemViewer *viewer = mem_viewer_open(buffer.data(), buffer.size());
+    if (!viewer) {
+        std::fprintf(stderr, "mem_viewer_open failed\n");
+        return 1;
+    }
+
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_TIMER) != 0) {
         std::fprintf(stderr, "SDL_Init failed: %s\n", SDL_GetError());
+        mem_viewer_destroy(viewer);
         return 1;
     }
 
@@ -16,16 +24,7 @@ int main() {
     SDL_Renderer *renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
     if (!window || !renderer) {
         std::fprintf(stderr, "SDL setup failed: %s\n", SDL_GetError());
-        SDL_Quit();
-        return 1;
-    }
-
-    std::vector<uint8_t> buffer(256, 0);
-    MemViewer *viewer = mem_viewer_open(buffer.data(), buffer.size());
-    if (!viewer) {
-        std::fprintf(stderr, "mem_viewer_open failed\n");
-        SDL_DestroyRenderer(renderer);
-        SDL_DestroyWindow(window);
+        mem_viewer_destroy(viewer);
         SDL_Quit();
         return 1;
     }

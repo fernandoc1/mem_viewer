@@ -1,14 +1,13 @@
 #include "mem_viewer.h"
 
 #include <gtkmm.h>
-#include <gtkmm/init.h>
-#include <gtk/gtk.h>
 
 #include <algorithm>
 #include <atomic>
 #include <chrono>
-#include <cctype>
 #include <cmath>
+#include <csignal>
+#include <cctype>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -17,7 +16,12 @@
 #include <memory>
 #include <sstream>
 #include <string>
+#include <sys/prctl.h>
+#include <sys/types.h>
+#include <sys/uio.h>
+#include <sys/wait.h>
 #include <thread>
+#include <unistd.h>
 #include <vector>
 
 namespace {
@@ -25,6 +29,7 @@ namespace {
 constexpr size_t kBytesPerRow = 16;
 constexpr int kRefreshMs = 100;
 constexpr double kFadeSeconds = 1.6;
+constexpr size_t kSearchChunkBytes = 64 * 1024;
 
 enum class SearchFormat {
     Hex,
@@ -101,11 +106,55 @@ static bool parse_uint64_value(const std::string &text, SearchFormat format, uin
     return true;
 }
 
+class RemoteMemory {
+public:
+    RemoteMemory(pid_t pid, uintptr_t address, size_t size)
+        : pid_(pid), address_(address), size_(size) {}
+
+    size_t size() const {
+        return size_;
+    }
+
+    bool read(size_t offset, void *buffer, size_t length) const {
+        if (offset >= size_) {
+            return false;
+        }
+        const size_t bounded = std::min(length, size_ - offset);
+        struct iovec local = {buffer, bounded};
+        struct iovec remote = {reinterpret_cast<void *>(address_ + offset), bounded};
+        const ssize_t result = process_vm_readv(pid_, &local, 1, &remote, 1, 0);
+        return result == static_cast<ssize_t>(bounded);
+    }
+
+    bool write(size_t offset, const void *buffer, size_t length) const {
+        if (offset >= size_) {
+            return false;
+        }
+        const size_t bounded = std::min(length, size_ - offset);
+        struct iovec local = {const_cast<void *>(buffer), bounded};
+        struct iovec remote = {reinterpret_cast<void *>(address_ + offset), bounded};
+        const ssize_t result = process_vm_writev(pid_, &local, 1, &remote, 1, 0);
+        return result == static_cast<ssize_t>(bounded);
+    }
+
+    bool read_byte(size_t offset, uint8_t &value) const {
+        return read(offset, &value, 1);
+    }
+
+    bool write_byte(size_t offset, uint8_t value) const {
+        return write(offset, &value, 1);
+    }
+
+private:
+    pid_t pid_;
+    uintptr_t address_;
+    size_t size_;
+};
+
 class MemViewerWindow : public Gtk::Window {
 public:
-    MemViewerWindow(uint8_t *memory, size_t size, std::atomic<bool> &open_flag)
-        : memory_(memory),
-          size_(size),
+    MemViewerWindow(pid_t target_pid, uintptr_t target_address, size_t size, std::atomic<bool> &open_flag)
+        : memory_(target_pid, target_address, size),
           open_flag_(open_flag),
           root_(Gtk::Orientation::HORIZONTAL, 10),
           main_panel_(Gtk::Orientation::VERTICAL, 8),
@@ -117,16 +166,13 @@ public:
           prev_button_("Prev"),
           next_button_("Next"),
           status_label_("No byte selected"),
-          rows_(size_ == 0 ? 0 : ((size_ + kBytesPerRow - 1) / kBytesPerRow)),
-          last_seen_(size_),
-          changed_at_(size_, -1.0),
-          match_mask_(size_, 0) {
+          rows_(memory_.size() == 0 ? 0 : ((memory_.size() + kBytesPerRow - 1) / kBytesPerRow)),
+          last_seen_(memory_.size(), 0),
+          changed_at_(memory_.size(), -1.0),
+          match_mask_(memory_.size(), 0) {
         set_title("Memory Viewer");
         set_default_size(900, 680);
-
-        if (size_ > 0) {
-            std::memcpy(last_seen_.data(), memory_, size_);
-        }
+        set_hide_on_close(true);
 
         root_.set_margin_top(8);
         root_.set_margin_bottom(8);
@@ -225,7 +271,6 @@ public:
         area_.add_controller(click_controller_);
 
         click_controller_->signal_pressed().connect(sigc::mem_fun(*this, &MemViewerWindow::on_click));
-
         refresh_button_.signal_clicked().connect(sigc::mem_fun(*this, &MemViewerWindow::refresh_visible_bytes));
         apply_button_.signal_clicked().connect(sigc::mem_fun(*this, &MemViewerWindow::apply_edit));
         prev_button_.signal_clicked().connect(sigc::bind(sigc::mem_fun(*this, &MemViewerWindow::navigate_match), -1));
@@ -269,7 +314,7 @@ private:
     }
 
     void refresh_visible_bytes() {
-        if (size_ == 0) {
+        if (memory_.size() == 0) {
             area_.queue_draw();
             return;
         }
@@ -280,31 +325,40 @@ private:
         const size_t first_row = static_cast<size_t>(std::max(0.0, std::floor(value / row_height_)));
         const size_t visible_rows = static_cast<size_t>(std::ceil(page_size / row_height_)) + 2;
         const size_t last_row = std::min(rows_, first_row + visible_rows);
-        const size_t begin = std::min(size_, first_row * kBytesPerRow);
-        const size_t end = std::min(size_, last_row * kBytesPerRow);
+        const size_t begin = std::min(memory_.size(), first_row * kBytesPerRow);
+        const size_t end = std::min(memory_.size(), last_row * kBytesPerRow);
         const double now = now_seconds();
 
-        bool changed = false;
-        for (size_t i = begin; i < end; ++i) {
-            const uint8_t current = memory_[i];
-            if (current != last_seen_[i]) {
-                last_seen_[i] = current;
-                changed_at_[i] = now;
-                changed = true;
+        visible_begin_ = begin;
+        visible_end_ = end;
+        visible_cache_.resize(end > begin ? (end - begin) : 0);
+
+        if (end > begin) {
+            if (!memory_.read(begin, visible_cache_.data(), visible_cache_.size())) {
+                std::fill(visible_cache_.begin(), visible_cache_.end(), 0);
             }
         }
 
-        if (selected_index_ < size_) {
+        for (size_t i = 0; i < visible_cache_.size(); ++i) {
+            const size_t index = begin + i;
+            const uint8_t current = visible_cache_[i];
+            if (current != last_seen_[index]) {
+                last_seen_[index] = current;
+                changed_at_[index] = now;
+            }
+        }
+
+        if (selected_index_ < memory_.size()) {
+            uint8_t value_byte = 0;
+            if (memory_.read_byte(selected_index_, value_byte)) {
+                last_seen_[selected_index_] = value_byte;
+            }
+            update_status();
+        } else {
             update_status();
         }
 
-        if (changed || begin != last_visible_begin_ || end != last_visible_end_) {
-            last_visible_begin_ = begin;
-            last_visible_end_ = end;
-            area_.queue_draw();
-        } else {
-            area_.queue_draw();
-        }
+        area_.queue_draw();
     }
 
     void rebuild_search() {
@@ -319,8 +373,8 @@ private:
             return;
         }
 
-        size_t width = current_search_width();
-        if (width == 0 || width > 8 || width > size_) {
+        const size_t width = current_search_width();
+        if (width == 0 || width > 8 || width > memory_.size()) {
             area_.queue_draw();
             update_status();
             return;
@@ -337,21 +391,31 @@ private:
             }
         }
 
-        for (size_t i = 0; i + width <= size_; ++i) {
-            bool matched = true;
-            for (size_t j = 0; j < width; ++j) {
-                if (memory_[i + j] != pattern[j]) {
-                    matched = false;
-                    break;
+        const size_t chunk_size = std::max(kSearchChunkBytes, width);
+        std::vector<uint8_t> chunk(chunk_size + width);
+        size_t offset = 0;
+
+        while (offset < memory_.size()) {
+            const size_t span = std::min(chunk_size, memory_.size() - offset);
+            if (!memory_.read(offset, chunk.data(), span)) {
+                break;
+            }
+
+            for (size_t i = 0; i + width <= span; ++i) {
+                if (std::memcmp(chunk.data() + i, pattern.data(), width) != 0) {
+                    continue;
+                }
+                const size_t match_index = offset + i;
+                matches_.push_back(match_index);
+                for (size_t j = 0; j < width; ++j) {
+                    match_mask_[match_index + j] = 1;
                 }
             }
-            if (!matched) {
-                continue;
+
+            if (offset + span >= memory_.size()) {
+                break;
             }
-            matches_.push_back(i);
-            for (size_t j = 0; j < width; ++j) {
-                match_mask_[i + j] = 1;
-            }
+            offset += span >= width ? (span - width + 1) : span;
         }
 
         if (!matches_.empty()) {
@@ -374,8 +438,7 @@ private:
         }
         selected_index_ = matches_[active_match_index_];
         scroll_to_index(selected_index_);
-        update_status();
-        area_.queue_draw();
+        refresh_visible_bytes();
     }
 
     void scroll_to_index(size_t index) {
@@ -393,24 +456,25 @@ private:
     }
 
     void apply_edit() {
-        if (selected_index_ >= size_) {
+        if (selected_index_ >= memory_.size()) {
             return;
         }
         uint8_t value = 0;
         if (!parse_byte_value(edit_entry_.get_text(), value)) {
             return;
         }
-        memory_[selected_index_] = value;
+        if (!memory_.write_byte(selected_index_, value)) {
+            return;
+        }
         last_seen_[selected_index_] = value;
         changed_at_[selected_index_] = now_seconds();
-        update_status();
-        area_.queue_draw();
+        refresh_visible_bytes();
     }
 
     void update_status() {
-        if (selected_index_ >= size_) {
+        if (selected_index_ >= memory_.size()) {
             std::ostringstream ss;
-            ss << "Buffer size: " << size_ << " bytes";
+            ss << "Buffer size: " << memory_.size() << " bytes";
             if (!matches_.empty()) {
                 ss << " | Matches: " << matches_.size();
             }
@@ -418,14 +482,15 @@ private:
             return;
         }
 
+        uint8_t value = last_seen_[selected_index_];
         char text[256];
         std::snprintf(
             text,
             sizeof(text),
             "Selected: 0x%08zx | hex=%02X | dec=%u | Matches=%zu",
             selected_index_,
-            memory_[selected_index_],
-            static_cast<unsigned>(memory_[selected_index_]),
+            value,
+            static_cast<unsigned>(value),
             matches_.size());
         status_label_.set_text(text);
     }
@@ -450,14 +515,18 @@ private:
             return;
         }
 
-        size_t index = row * kBytesPerRow + static_cast<size_t>(byte_in_row);
-        if (index >= size_) {
+        const size_t index = row * kBytesPerRow + static_cast<size_t>(byte_in_row);
+        if (index >= memory_.size()) {
             return;
         }
 
         selected_index_ = index;
+        uint8_t value = last_seen_[index];
+        if (memory_.read_byte(index, value)) {
+            last_seen_[index] = value;
+        }
         char text[8];
-        std::snprintf(text, sizeof(text), "%02X", memory_[index]);
+        std::snprintf(text, sizeof(text), "%02X", value);
         edit_entry_.set_text(text);
         update_status();
         area_.queue_draw();
@@ -493,7 +562,7 @@ private:
 
             for (size_t col = 0; col < kBytesPerRow; ++col) {
                 const size_t index = row_base + col;
-                if (index >= size_) {
+                if (index >= memory_.size()) {
                     break;
                 }
 
@@ -503,6 +572,7 @@ private:
                 const bool matched = match_mask_[index] != 0;
                 const double age = changed_at_[index] < 0.0 ? kFadeSeconds : (now - changed_at_[index]);
                 const double fade = std::clamp(1.0 - (age / kFadeSeconds), 0.0, 1.0);
+                const uint8_t value = byte_for_index(index);
 
                 if (fade > 0.0 || selected || matched) {
                     double r = 0.14;
@@ -537,13 +607,20 @@ private:
                 }
 
                 char hex[4];
-                std::snprintf(hex, sizeof(hex), "%02X", memory_[index]);
+                std::snprintf(hex, sizeof(hex), "%02X", value);
                 draw_text(cr, cell_x, y + baseline_y_, 0.93, 0.93, 0.94, hex);
 
-                char ascii[2] = { printable(memory_[index]), '\0' };
+                char ascii[2] = { printable(value), '\0' };
                 draw_text(cr, ascii_x, y + baseline_y_, 0.80, 0.86, 0.89, ascii);
             }
         }
+    }
+
+    uint8_t byte_for_index(size_t index) const {
+        if (index >= visible_begin_ && index < visible_end_) {
+            return visible_cache_[index - visible_begin_];
+        }
+        return last_seen_[index];
     }
 
     void draw_text(const Cairo::RefPtr<Cairo::Context> &cr, double x, double y, double r, double g, double b, const char *text) {
@@ -578,8 +655,7 @@ private:
         return static_cast<size_t>(std::strtoul(text.c_str(), nullptr, 10));
     }
 
-    uint8_t *memory_;
-    size_t size_;
+    RemoteMemory memory_;
     std::atomic<bool> &open_flag_;
 
     Gtk::Box root_;
@@ -607,11 +683,12 @@ private:
     std::vector<double> changed_at_;
     std::vector<uint8_t> match_mask_;
     std::vector<size_t> matches_;
+    std::vector<uint8_t> visible_cache_;
 
+    size_t visible_begin_ = 0;
+    size_t visible_end_ = 0;
     size_t selected_index_ = std::numeric_limits<size_t>::max();
     size_t active_match_index_ = 0;
-    size_t last_visible_begin_ = std::numeric_limits<size_t>::max();
-    size_t last_visible_end_ = std::numeric_limits<size_t>::max();
 
     const double row_height_ = 20.0;
     const double font_size_ = 12.0;
@@ -622,50 +699,48 @@ private:
     const double ascii_cell_width_ = 8.2;
 };
 
-struct MemViewerImpl {
-    explicit MemViewerImpl(void *memory_ptr, size_t memory_size)
-        : memory(static_cast<uint8_t *>(memory_ptr)), size(memory_size), open(false), shutdown(false) {}
-
-    uint8_t *memory;
-    size_t size;
-    std::atomic<bool> open;
-    std::atomic<bool> shutdown;
-    std::thread ui_thread;
-    Glib::RefPtr<Gtk::Application> app;
-    MemViewerWindow *window = nullptr;
-    std::unique_ptr<MemViewerWindow> owned_window;
+struct MemViewerProcess {
+    explicit MemViewerProcess(pid_t child_pid) : pid(child_pid) {}
+    pid_t pid;
 };
 
-static void run_ui_thread(MemViewerImpl *impl) {
+static int run_viewer_process(pid_t target_pid, uintptr_t target_address, size_t size) {
+    prctl(PR_SET_PDEATHSIG, SIGTERM);
+
     auto app = Gtk::Application::create("com.example.memviewer", Gio::Application::Flags::NON_UNIQUE);
-    impl->app = app;
+    std::atomic<bool> open_flag{false};
+    std::unique_ptr<MemViewerWindow> window;
 
-    app->signal_activate().connect([impl, app]() {
-        if (impl->owned_window) {
-            impl->owned_window->present();
-            return;
+    app->signal_activate().connect([&]() {
+        if (!window) {
+            window = std::make_unique<MemViewerWindow>(target_pid, target_address, size, open_flag);
+            window->signal_hide().connect([&]() { app->quit(); });
+            app->add_window(*window);
         }
-
-        impl->owned_window = std::make_unique<MemViewerWindow>(impl->memory, impl->size, impl->open);
-        impl->window = impl->owned_window.get();
-        impl->open.store(true, std::memory_order_relaxed);
-        impl->window->signal_hide().connect([app]() { app->quit(); });
-        app->add_window(*impl->window);
-        impl->window->present();
+        open_flag.store(true, std::memory_order_relaxed);
+        window->present();
     });
 
-    app->run();
+    return app->run();
+}
 
-    impl->window = nullptr;
-    impl->owned_window.reset();
-    impl->open.store(false, std::memory_order_relaxed);
-    impl->app.reset();
+static bool child_is_alive(pid_t pid) {
+    if (pid <= 0) {
+        return false;
+    }
+
+    int status = 0;
+    const pid_t result = waitpid(pid, &status, WNOHANG);
+    if (result == 0) {
+        return true;
+    }
+    return false;
 }
 
 }  // namespace
 
 struct MemViewer {
-    MemViewerImpl *impl;
+    MemViewerProcess *process;
 };
 
 extern "C" MemViewer *mem_viewer_open(void *memory, size_t size) {
@@ -673,36 +748,41 @@ extern "C" MemViewer *mem_viewer_open(void *memory, size_t size) {
         return nullptr;
     }
 
+    const pid_t parent_pid = getpid();
+    const uintptr_t address = reinterpret_cast<uintptr_t>(memory);
+    const pid_t child = fork();
+    if (child < 0) {
+        return nullptr;
+    }
+
+    if (child == 0) {
+        const int status = run_viewer_process(parent_pid, address, size);
+        _exit(status == 0 ? 0 : 1);
+    }
+
     auto *viewer = new MemViewer;
-    viewer->impl = new MemViewerImpl(memory, size);
-    viewer->impl->ui_thread = std::thread(run_ui_thread, viewer->impl);
+    viewer->process = new MemViewerProcess(child);
     return viewer;
 }
 
 extern "C" void mem_viewer_destroy(MemViewer *viewer) {
-    if (viewer == nullptr || viewer->impl == nullptr) {
+    if (viewer == nullptr || viewer->process == nullptr) {
         return;
     }
 
-    MemViewerImpl *impl = viewer->impl;
-    impl->shutdown.store(true, std::memory_order_relaxed);
-
-    if (impl->app) {
-        auto app = impl->app;
-        Glib::signal_idle().connect_once([app]() { app->quit(); });
+    const pid_t pid = viewer->process->pid;
+    if (pid > 0) {
+        kill(pid, SIGTERM);
+        waitpid(pid, nullptr, 0);
     }
 
-    if (impl->ui_thread.joinable()) {
-        impl->ui_thread.join();
-    }
-
-    delete impl;
+    delete viewer->process;
     delete viewer;
 }
 
 extern "C" int mem_viewer_is_open(MemViewer *viewer) {
-    if (viewer == nullptr || viewer->impl == nullptr) {
+    if (viewer == nullptr || viewer->process == nullptr) {
         return 0;
     }
-    return viewer->impl->open.load(std::memory_order_relaxed) ? 1 : 0;
+    return child_is_alive(viewer->process->pid) ? 1 : 0;
 }
