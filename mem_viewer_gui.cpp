@@ -168,17 +168,6 @@ static bool parse_uint64_value(const std::string &text, SearchFormat format, uin
     return true;
 }
 
-static std::string selection_key(const std::vector<size_t> &positions) {
-    std::ostringstream ss;
-    for (size_t i = 0; i < positions.size(); ++i) {
-        if (i > 0) {
-            ss << ',';
-        }
-        ss << positions[i];
-    }
-    return ss.str();
-}
-
 static QString selection_summary_text(const std::vector<size_t> &positions) {
     if (positions.empty()) {
         return QStringLiteral("No bytes selected");
@@ -207,6 +196,15 @@ static QString selection_summary_text(const std::vector<size_t> &positions) {
 
 class AnnotationStore {
 public:
+    struct ResolvedAnnotation {
+        std::vector<size_t> positions;
+        std::string note;
+
+        bool isValid() const {
+            return !positions.empty();
+        }
+    };
+
     bool hasFilePath() const {
         return !file_path_.isEmpty();
     }
@@ -270,15 +268,37 @@ public:
             AnnotationEntry entry;
             entry.positions.assign(unique_positions.begin(), unique_positions.end());
             entry.note = entry_object.value(QStringLiteral("note")).toString().toStdString();
-            annotations_[selection_key(entry.positions)] = std::move(entry);
+            annotations_.push_back(std::move(entry));
         }
 
         return true;
     }
 
-    std::string noteForSelection(const std::vector<size_t> &positions) const {
-        const auto it = annotations_.find(selection_key(positions));
-        return it == annotations_.end() ? std::string() : it->second.note;
+    ResolvedAnnotation resolveForSelection(const std::vector<size_t> &positions) const {
+        if (positions.empty()) {
+            return {};
+        }
+
+        for (const AnnotationEntry &entry : annotations_) {
+            if (entry.positions == positions) {
+                return {entry.positions, entry.note};
+            }
+        }
+
+        const AnnotationEntry *best_match = nullptr;
+        for (const AnnotationEntry &entry : annotations_) {
+            if (!containsAllPositions(entry.positions, positions)) {
+                continue;
+            }
+            if (best_match == nullptr || entry.positions.size() < best_match->positions.size()) {
+                best_match = &entry;
+            }
+        }
+
+        if (best_match == nullptr) {
+            return {};
+        }
+        return {best_match->positions, best_match->note};
     }
 
     bool setAnnotation(const std::vector<size_t> &positions, const std::string &note, QString *error_message = nullptr) {
@@ -286,28 +306,58 @@ public:
             return true;
         }
 
-        AnnotationEntry entry;
-        entry.positions = positions;
-        entry.note = note;
+        const std::vector<size_t> normalized_positions = normalizePositions(positions);
+        const auto existing = std::find_if(annotations_.begin(), annotations_.end(), [&](const AnnotationEntry &entry) {
+            return entry.positions == normalized_positions;
+        });
 
-        const std::string key = selection_key(positions);
         if (trim_copy(note).empty()) {
-            annotations_.erase(key);
+            if (existing != annotations_.end()) {
+                annotations_.erase(existing);
+            }
         } else {
-            annotations_[key] = std::move(entry);
+            AnnotationEntry entry;
+            entry.positions = normalized_positions;
+            entry.note = note;
+            if (existing != annotations_.end()) {
+                *existing = std::move(entry);
+            } else {
+                annotations_.push_back(std::move(entry));
+            }
         }
         return save(error_message);
     }
 
 private:
+    static std::vector<size_t> normalizePositions(const std::vector<size_t> &positions) {
+        std::set<size_t> unique_positions(positions.begin(), positions.end());
+        return std::vector<size_t>(unique_positions.begin(), unique_positions.end());
+    }
+
+    static bool containsAllPositions(const std::vector<size_t> &haystack, const std::vector<size_t> &needle) {
+        if (needle.empty() || haystack.empty()) {
+            return false;
+        }
+
+        size_t haystack_index = 0;
+        for (size_t position : needle) {
+            while (haystack_index < haystack.size() && haystack[haystack_index] < position) {
+                ++haystack_index;
+            }
+            if (haystack_index >= haystack.size() || haystack[haystack_index] != position) {
+                return false;
+            }
+        }
+        return true;
+    }
+
     bool save(QString *error_message) const {
         if (file_path_.isEmpty()) {
             return true;
         }
 
         QJsonArray annotation_array;
-        for (const auto &[key, entry] : annotations_) {
-            (void)key;
+        for (const AnnotationEntry &entry : annotations_) {
             QJsonObject object;
             QJsonArray positions;
             for (size_t position : entry.positions) {
@@ -334,7 +384,7 @@ private:
     }
 
     QString file_path_;
-    std::map<std::string, AnnotationEntry> annotations_;
+    std::vector<AnnotationEntry> annotations_;
 };
 
 class RemoteMemory {
@@ -1309,10 +1359,10 @@ private:
         const bool can_edit = !current_selection_.empty();
         annotation_editor_->setEnabled(can_edit);
 
-        const QString note = QString::fromStdString(annotation_store_.noteForSelection(current_selection_));
-        const bool blocked = annotation_editor_->blockSignals(true);
+        active_annotation_ = annotation_store_.resolveForSelection(current_selection_);
+        const QString note = QString::fromStdString(active_annotation_.note);
+        const QSignalBlocker blocker(annotation_editor_);
         annotation_editor_->setPlainText(note);
-        annotation_editor_->blockSignals(blocked);
     }
 
     void onAnnotationEdited() {
@@ -1325,10 +1375,13 @@ private:
             return;
         }
 
+        const std::vector<size_t> target_positions = active_annotation_.isValid() ? active_annotation_.positions : current_selection_;
         QString error_message;
-        if (!annotation_store_.setAnnotation(current_selection_, annotation_editor_->toPlainText().toStdString(), &error_message)) {
+        if (!annotation_store_.setAnnotation(target_positions, annotation_editor_->toPlainText().toStdString(), &error_message)) {
             QMessageBox::warning(this, QStringLiteral("Annotations"), error_message);
+            return;
         }
+        active_annotation_ = annotation_store_.resolveForSelection(current_selection_);
         updateStatus();
     }
 
@@ -1391,6 +1444,7 @@ private:
     QTextEdit *annotation_editor_;
     QLabel *status_label_;
     AnnotationStore annotation_store_;
+    AnnotationStore::ResolvedAnnotation active_annotation_;
     std::vector<size_t> current_selection_;
 };
 
