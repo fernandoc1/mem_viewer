@@ -734,8 +734,8 @@ private:
     const double hex_start_x_ = address_x_ + kAddressChars * kAddressCharWidth + kGapAddressToHex;
     const double ascii_start_x_ = hex_start_x_ + (kBytesPerRow * 3 - 1) * hex_cell_width_ + kGapHexToAscii;
     const double content_width_ = ascii_start_x_ + kBytesPerRow * ascii_cell_width_ + 4.0;
-    const double hex_highlight_width_ = hex_cell_width_ * 1.55;
-    const double ascii_highlight_width_ = ascii_cell_width_ * 1.15;
+    const double hex_highlight_width_ = hex_cell_width_ * 1.72;
+    const double ascii_highlight_width_ = ascii_cell_width_ * 1.35;
 };
 
 }  // namespace
