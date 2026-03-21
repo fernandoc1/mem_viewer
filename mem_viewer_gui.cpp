@@ -260,8 +260,28 @@ public:
           rows_(memory_size_ == 0 ? 0 : ((memory_size_ + kBytesPerRow - 1) / kBytesPerRow)),
           last_seen_(memory_size_, 0),
           changed_at_(memory_size_, -1.0),
-          match_mask_(memory_size_, 0) {
+          match_mask_(memory_size_, 0),
+          font_("Monospace", 11) {
         
+        font_.setStyleHint(QFont::Monospace);
+        font_.setFixedPitch(true);
+        QFontMetrics fm(font_);
+
+        char_width_ = fm.horizontalAdvance('W'); 
+        row_height_ = static_cast<double>(fm.lineSpacing()) + 2.0;
+        baseline_y_ = static_cast<double>(fm.ascent()) + 1.0;
+        
+        address_x_ = kAddressX;
+        hex_cell_width_ = char_width_; 
+        ascii_cell_width_ = char_width_;
+        
+        hex_start_x_ = address_x_ + kAddressChars * char_width_ + kGapAddressToHex;
+        ascii_start_x_ = hex_start_x_ + (kBytesPerRow * 3 - 1) * hex_cell_width_ + kGapHexToAscii;
+        content_width_ = ascii_start_x_ + kBytesPerRow * ascii_cell_width_ + 4.0;
+        
+        hex_highlight_width_ = hex_cell_width_ * 2.2;
+        ascii_highlight_width_ = ascii_cell_width_ * 1.2;
+
         setFocusPolicy(Qt::StrongFocus);
         setMinimumWidth(static_cast<int>(content_width_));
         setMinimumHeight(static_cast<int>(rows_ * row_height_));
@@ -473,11 +493,7 @@ protected:
 
         painter.fillRect(rect(), QColor(0x14, 0x16, 0x1A));
 
-        QFont font("Monospace", 11);
-        font.setStyleHint(QFont::Monospace);
-        painter.setFont(font);
-        QFontMetrics fm(font);
-        (void)fm;
+        painter.setFont(font_);
 
         for (size_t row = first_row; row < last_row; ++row) {
             const double y = static_cast<double>(row * row_height_);
@@ -530,7 +546,7 @@ protected:
                         a = std::max(a, static_cast<int>(255 * 0.35));
                     }
 
-                    painter.fillRect(QRectF(cell_x - 1.0, y + 1.5, hex_highlight_width_, row_height_ - 3.0),
+                    painter.fillRect(QRectF(cell_x - 2.0, y + 1.5, hex_highlight_width_, row_height_ - 3.0),
                                      QColor(static_cast<int>(r * 255), static_cast<int>(g * 255), static_cast<int>(b * 255), a));
                     painter.fillRect(QRectF(ascii_x - 1.0, y + 1.5, ascii_highlight_width_, row_height_ - 3.0),
                                      QColor(static_cast<int>(r * 255), static_cast<int>(g * 255), static_cast<int>(b * 255), a));
@@ -560,11 +576,11 @@ protected:
         }
 
         const double hex_x = event->position().x() - hex_start_x_;
-        if (hex_x < 0.0) {
+        if (hex_x < -2.0) {
             return;
         }
 
-        const int cell = static_cast<int>(hex_x / hex_cell_width_);
+        const int cell = static_cast<int>((hex_x + 2.0) / hex_cell_width_);
         const int byte_in_row = cell / 3;
         if (byte_in_row < 0 || byte_in_row >= static_cast<int>(kBytesPerRow)) {
             return;
@@ -683,16 +699,18 @@ private:
     size_t selected_index_ = std::numeric_limits<size_t>::max();
     size_t active_match_index_ = 0;
 
-    const double row_height_ = 18.0;
-    const double baseline_y_ = 13.3;
-    const double address_x_ = kAddressX;
-    const double hex_cell_width_ = 6.8;
-    const double ascii_cell_width_ = 6.6;
-    const double hex_start_x_ = address_x_ + kAddressChars * kAddressCharWidth + kGapAddressToHex;
-    const double ascii_start_x_ = hex_start_x_ + (kBytesPerRow * 3 - 1) * hex_cell_width_ + kGapHexToAscii;
-    const double content_width_ = ascii_start_x_ + kBytesPerRow * ascii_cell_width_ + 4.0;
-    const double hex_highlight_width_ = hex_cell_width_ * 1.72;
-    const double ascii_highlight_width_ = ascii_cell_width_ * 1.35;
+    QFont font_;
+    double char_width_;
+    double row_height_;
+    double baseline_y_;
+    double address_x_;
+    double hex_cell_width_;
+    double ascii_cell_width_;
+    double hex_start_x_;
+    double ascii_start_x_;
+    double content_width_;
+    double hex_highlight_width_;
+    double ascii_highlight_width_;
 };
 
 class MemViewerWindow : public QMainWindow {
