@@ -21,7 +21,7 @@ static void sleep_us(long usec) {
 
 int main(int argc, char **argv) {
     const size_t size = 1 << 16;
-    int wait_mode = 0;
+    int wait_mode = 1;
     int updater_pid = -1;
 
     uint8_t *buffer = (uint8_t *)mem_viewer_shared_malloc(size);
@@ -37,6 +37,8 @@ int main(int argc, char **argv) {
     for (int i = 1; i < argc; ++i) {
         if (strcmp(argv[i], "--wait") == 0) {
             wait_mode = 1;
+        } else if (strcmp(argv[i], "--no-wait") == 0) {
+            wait_mode = 0;
         }
     }
 

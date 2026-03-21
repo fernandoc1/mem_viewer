@@ -18,7 +18,7 @@ static void sleep_us(long usec) {
 int main(int argc, char **argv) {
     const size_t size = 1 << 16;
     uint8_t *buffer = (uint8_t *)malloc(size);
-    int wait_mode = 0;
+    int wait_mode = 1;
     size_t i;
 
     if (!buffer) {
@@ -33,6 +33,8 @@ int main(int argc, char **argv) {
     for (i = 1; i < (size_t)argc; ++i) {
         if (strcmp(argv[i], "--wait") == 0) {
             wait_mode = 1;
+        } else if (strcmp(argv[i], "--no-wait") == 0) {
+            wait_mode = 0;
         }
     }
 

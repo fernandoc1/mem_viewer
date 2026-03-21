@@ -16,7 +16,15 @@
 #include <QPainter>
 #include <QFont>
 #include <QFontMetrics>
+#include <QFileDialog>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QMenu>
+#include <QMenuBar>
+#include <QMessageBox>
 #include <QMouseEvent>
+#include <QTextEdit>
 #include <QWheelEvent>
 #include <QResizeEvent>
 #include <QMainWindow>
@@ -33,7 +41,9 @@
 #include <cstring>
 #include <csignal>
 #include <functional>
+#include <map>
 #include <limits>
+#include <set>
 #include <memory>
 #include <sstream>
 #include <string>
@@ -75,6 +85,11 @@ constexpr double kAddressChars = 8.0;
 constexpr double kAddressCharWidth = 7.0;
 constexpr double kGapAddressToHex = 6.0;
 constexpr double kGapHexToAscii = 6.0;
+
+struct AnnotationEntry {
+    std::vector<size_t> positions;
+    std::string note;
+};
 
 enum class SearchFormat {
     Hex,
@@ -150,6 +165,175 @@ static bool parse_uint64_value(const std::string &text, SearchFormat format, uin
     value = static_cast<uint64_t>(parsed);
     return true;
 }
+
+static std::string selection_key(const std::vector<size_t> &positions) {
+    std::ostringstream ss;
+    for (size_t i = 0; i < positions.size(); ++i) {
+        if (i > 0) {
+            ss << ',';
+        }
+        ss << positions[i];
+    }
+    return ss.str();
+}
+
+static QString selection_summary_text(const std::vector<size_t> &positions) {
+    if (positions.empty()) {
+        return QStringLiteral("No bytes selected");
+    }
+
+    std::ostringstream ss;
+    ss << positions.size() << " byte";
+    if (positions.size() != 1) {
+        ss << 's';
+    }
+    ss << " selected";
+
+    const size_t first = positions.front();
+    const size_t last = positions.back();
+    ss << " | Range: 0x" << std::hex << std::uppercase;
+    ss.width(8);
+    ss.fill('0');
+    ss << first;
+    ss << "-0x";
+    ss.width(8);
+    ss.fill('0');
+    ss << last;
+
+    return QString::fromStdString(ss.str());
+}
+
+class AnnotationStore {
+public:
+    bool hasFilePath() const {
+        return !file_path_.isEmpty();
+    }
+
+    QString filePath() const {
+        return file_path_;
+    }
+
+    bool selectFile(const QString &path, QString *error_message = nullptr) {
+        if (path.isEmpty()) {
+            return false;
+        }
+
+        file_path_ = path;
+        annotations_.clear();
+
+        QFile file(file_path_);
+        if (!file.exists()) {
+            return save(error_message);
+        }
+
+        if (!file.open(QIODevice::ReadOnly)) {
+            if (error_message) {
+                *error_message = QStringLiteral("Failed to open %1: %2").arg(file_path_, file.errorString());
+            }
+            return false;
+        }
+
+        QJsonParseError parse_error{};
+        const QJsonDocument document = QJsonDocument::fromJson(file.readAll(), &parse_error);
+        if (parse_error.error != QJsonParseError::NoError || !document.isObject()) {
+            if (error_message) {
+                *error_message = QStringLiteral("Invalid JSON in %1: %2").arg(file_path_, parse_error.errorString());
+            }
+            annotations_.clear();
+            return false;
+        }
+
+        const QJsonArray annotations = document.object().value(QStringLiteral("annotations")).toArray();
+        for (const QJsonValue &entry_value : annotations) {
+            if (!entry_value.isObject()) {
+                continue;
+            }
+            const QJsonObject entry_object = entry_value.toObject();
+            const QJsonArray positions_array = entry_object.value(QStringLiteral("positions")).toArray();
+            std::set<size_t> unique_positions;
+            for (const QJsonValue &position_value : positions_array) {
+                if (!position_value.isDouble()) {
+                    continue;
+                }
+                const qint64 raw_value = static_cast<qint64>(position_value.toDouble());
+                if (raw_value < 0) {
+                    continue;
+                }
+                unique_positions.insert(static_cast<size_t>(raw_value));
+            }
+            if (unique_positions.empty()) {
+                continue;
+            }
+
+            AnnotationEntry entry;
+            entry.positions.assign(unique_positions.begin(), unique_positions.end());
+            entry.note = entry_object.value(QStringLiteral("note")).toString().toStdString();
+            annotations_[selection_key(entry.positions)] = std::move(entry);
+        }
+
+        return true;
+    }
+
+    std::string noteForSelection(const std::vector<size_t> &positions) const {
+        const auto it = annotations_.find(selection_key(positions));
+        return it == annotations_.end() ? std::string() : it->second.note;
+    }
+
+    bool setAnnotation(const std::vector<size_t> &positions, const std::string &note, QString *error_message = nullptr) {
+        if (positions.empty()) {
+            return true;
+        }
+
+        AnnotationEntry entry;
+        entry.positions = positions;
+        entry.note = note;
+
+        const std::string key = selection_key(positions);
+        if (trim_copy(note).empty()) {
+            annotations_.erase(key);
+        } else {
+            annotations_[key] = std::move(entry);
+        }
+        return save(error_message);
+    }
+
+private:
+    bool save(QString *error_message) const {
+        if (file_path_.isEmpty()) {
+            return true;
+        }
+
+        QJsonArray annotation_array;
+        for (const auto &[key, entry] : annotations_) {
+            (void)key;
+            QJsonObject object;
+            QJsonArray positions;
+            for (size_t position : entry.positions) {
+                positions.append(static_cast<qint64>(position));
+            }
+            object.insert(QStringLiteral("positions"), positions);
+            object.insert(QStringLiteral("note"), QString::fromStdString(entry.note));
+            annotation_array.append(object);
+        }
+
+        QJsonObject root;
+        root.insert(QStringLiteral("annotations"), annotation_array);
+        const QJsonDocument document(root);
+
+        QFile file(file_path_);
+        if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+            if (error_message) {
+                *error_message = QStringLiteral("Failed to write %1: %2").arg(file_path_, file.errorString());
+            }
+            return false;
+        }
+        file.write(document.toJson(QJsonDocument::Indented));
+        return true;
+    }
+
+    QString file_path_;
+    std::map<std::string, AnnotationEntry> annotations_;
+};
 
 class RemoteMemory {
 public:
@@ -261,6 +445,7 @@ public:
           last_seen_(memory_size_, 0),
           changed_at_(memory_size_, -1.0),
           match_mask_(memory_size_, 0),
+          selection_mask_(memory_size_, 0),
           font_("Monospace", 11) {
         
         font_.setStyleHint(QFont::Monospace);
@@ -342,10 +527,13 @@ public:
             }
         }
 
-        if (selected_index_ < memory_size_) {
+        for (size_t index : selected_indices_) {
+            if (index >= memory_size_) {
+                continue;
+            }
             uint8_t value_byte = 0;
-            if (read_memory_(selected_index_, &value_byte, 1)) {
-                last_seen_[selected_index_] = value_byte;
+            if (read_memory_(index, &value_byte, 1)) {
+                last_seen_[index] = value_byte;
             }
         }
 
@@ -409,8 +597,8 @@ public:
         }
 
         if (!matches_.empty()) {
-            selected_index_ = matches_.front();
-            scroll_to_index(selected_index_);
+            setSingleSelection(matches_.front());
+            scroll_to_index(matches_.front());
         }
         if (onSearchStatusUpdated) onSearchStatusUpdated();
         update();
@@ -426,8 +614,8 @@ public:
         } else {
             active_match_index_ = (active_match_index_ + 1) % count;
         }
-        selected_index_ = matches_[active_match_index_];
-        scroll_to_index(selected_index_);
+        setSingleSelection(matches_[active_match_index_]);
+        scroll_to_index(matches_[active_match_index_]);
         refreshVisibleBytes();
     }
 
@@ -435,24 +623,28 @@ public:
         if (index >= memory_size_) {
             return;
         }
-        selected_index_ = index;
+        setSingleSelection(index);
         uint8_t value = last_seen_[index];
         if (read_memory_(index, &value, 1)) {
             last_seen_[index] = value;
         }
-        if (onByteSelected) onByteSelected(index, value);
         update();
     }
 
     size_t getSelectedIndex() const {
-        return selected_index_;
+        return selected_indices_.size() == 1 ? selected_indices_.front() : std::numeric_limits<size_t>::max();
     }
 
     uint8_t getSelectedValue() const {
-        if (selected_index_ >= memory_size_) {
+        const size_t selected_index = getSelectedIndex();
+        if (selected_index >= memory_size_) {
             return 0;
         }
-        return last_seen_[selected_index_];
+        return last_seen_[selected_index];
+    }
+
+    const std::vector<size_t> &getSelectedIndices() const {
+        return selected_indices_;
     }
 
     size_t getMatchCount() const {
@@ -464,18 +656,19 @@ public:
     }
 
     void applyEdit(uint8_t value) {
-        if (selected_index_ >= memory_size_) {
+        const size_t selected_index = getSelectedIndex();
+        if (selected_index >= memory_size_) {
             return;
         }
-        if (!write_memory_(selected_index_, &value, 1)) {
+        if (!write_memory_(selected_index, &value, 1)) {
             return;
         }
-        last_seen_[selected_index_] = value;
-        changed_at_[selected_index_] = now_seconds();
+        last_seen_[selected_index] = value;
+        changed_at_[selected_index] = now_seconds();
         refreshVisibleBytes();
     }
 
-    std::function<void(size_t, uint8_t)> onByteSelected;
+    std::function<void(const std::vector<size_t> &)> onSelectionChanged;
     std::function<void()> onSearchStatusUpdated;
 
 protected:
@@ -515,7 +708,7 @@ protected:
 
                 const double cell_x = hex_start_x_ + static_cast<double>(col * 3) * hex_cell_width_;
                 const double ascii_x = ascii_start_x_ + static_cast<double>(col) * ascii_cell_width_;
-                const bool selected = index == selected_index_;
+                const bool selected = selection_mask_[index] != 0;
                 const bool matched = match_mask_[index] != 0;
                 const double age = changed_at_[index] < 0.0 ? kFadeSeconds : (now - changed_at_[index]);
                 const double fade = std::clamp(1.0 - (age / kFadeSeconds), 0.0, 1.0);
@@ -589,7 +782,14 @@ protected:
             return;
         }
 
-        setSelectedIndex(index);
+        const Qt::KeyboardModifiers modifiers = event->modifiers();
+        if ((modifiers & Qt::ShiftModifier) != 0 && selection_anchor_ < memory_size_) {
+            selectRange(selection_anchor_, index, (modifiers & Qt::ControlModifier) != 0);
+        } else if ((modifiers & Qt::ControlModifier) != 0) {
+            toggleSelection(index);
+        } else {
+            setSelectedIndex(index);
+        }
     }
 
     void wheelEvent(QWheelEvent *event) override {
@@ -689,13 +889,15 @@ private:
     std::vector<uint8_t> last_seen_;
     std::vector<double> changed_at_;
     std::vector<uint8_t> match_mask_;
+    std::vector<uint8_t> selection_mask_;
     std::vector<size_t> matches_;
     std::vector<uint8_t> visible_cache_;
 
     size_t visible_begin_ = 0;
     size_t visible_end_ = 0;
-    size_t selected_index_ = std::numeric_limits<size_t>::max();
     size_t active_match_index_ = 0;
+    size_t selection_anchor_ = std::numeric_limits<size_t>::max();
+    std::vector<size_t> selected_indices_;
 
     QFont font_;
     double char_width_;
@@ -709,6 +911,58 @@ private:
     double content_width_;
     double hex_highlight_width_;
     double ascii_highlight_width_;
+
+    void clearSelection() {
+        std::fill(selection_mask_.begin(), selection_mask_.end(), 0);
+        selected_indices_.clear();
+    }
+
+    void setSingleSelection(size_t index) {
+        clearSelection();
+        selection_mask_[index] = 1;
+        selected_indices_.push_back(index);
+        selection_anchor_ = index;
+        notifySelectionChanged();
+    }
+
+    void toggleSelection(size_t index) {
+        if (selection_mask_[index] != 0) {
+            selection_mask_[index] = 0;
+            selected_indices_.erase(std::remove(selected_indices_.begin(), selected_indices_.end(), index), selected_indices_.end());
+        } else {
+            selection_mask_[index] = 1;
+            selected_indices_.push_back(index);
+        }
+        std::sort(selected_indices_.begin(), selected_indices_.end());
+        selection_anchor_ = index;
+        notifySelectionChanged();
+        update();
+    }
+
+    void selectRange(size_t first, size_t last, bool additive) {
+        if (!additive) {
+            clearSelection();
+        }
+        const size_t begin = std::min(first, last);
+        const size_t end = std::max(first, last);
+        for (size_t index = begin; index <= end; ++index) {
+            if (index >= memory_size_ || selection_mask_[index] != 0) {
+                continue;
+            }
+            selection_mask_[index] = 1;
+            selected_indices_.push_back(index);
+        }
+        std::sort(selected_indices_.begin(), selected_indices_.end());
+        selection_anchor_ = last;
+        notifySelectionChanged();
+        update();
+    }
+
+    void notifySelectionChanged() {
+        if (onSelectionChanged) {
+            onSelectionChanged(selected_indices_);
+        }
+    }
 };
 
 class MemViewerWindow : public QMainWindow {
@@ -723,6 +977,7 @@ public:
         setWindowTitle("Memory Viewer");
         resize(900, 680);
         setAttribute(Qt::WA_DeleteOnClose);
+        createMenus();
 
         QWidget *central = new QWidget(this);
         setCentralWidget(central);
@@ -743,7 +998,7 @@ public:
         main_layout->addWidget(scroll_area_);
 
         QWidget *side_panel = new QWidget();
-        side_panel->setFixedWidth(180);
+        side_panel->setFixedWidth(260);
         QVBoxLayout *side_layout = new QVBoxLayout(side_panel);
         side_layout->setSpacing(8);
 
@@ -851,6 +1106,26 @@ public:
 
         side_layout->addWidget(edit_frame);
 
+        QFrame *annotation_frame = new QFrame();
+        annotation_frame->setFrameStyle(QFrame::Box | QFrame::Raised);
+        QVBoxLayout *annotation_layout = new QVBoxLayout(annotation_frame);
+        annotation_layout->setContentsMargins(8, 8, 8, 8);
+        annotation_layout->setSpacing(6);
+
+        annotation_selection_label_ = new QLabel("No bytes selected");
+        annotation_selection_label_->setWordWrap(true);
+        annotation_layout->addWidget(annotation_selection_label_);
+
+        annotation_file_label_ = new QLabel("Annotation file: not selected");
+        annotation_file_label_->setWordWrap(true);
+        annotation_layout->addWidget(annotation_file_label_);
+
+        annotation_editor_ = new QTextEdit();
+        annotation_editor_->setPlaceholderText("Select one or more bytes and type notes here");
+        annotation_editor_->setEnabled(false);
+        annotation_layout->addWidget(annotation_editor_);
+        side_layout->addWidget(annotation_frame);
+
         QFrame *status_frame = new QFrame();
         status_frame->setFrameStyle(QFrame::Box | QFrame::Raised);
         QVBoxLayout *status_layout = new QVBoxLayout(status_frame);
@@ -871,14 +1146,11 @@ public:
         viewer_widget_ = new MemViewerWidget(memory_size, read_memory, write_memory, open_flag, scroll_area_);
         scroll_area_->setWidget(viewer_widget_);
 
-        viewer_widget_->onByteSelected = [this](size_t index, uint8_t value) {
-            updateStatus(index, value);
-            char text[8];
-            std::snprintf(text, sizeof(text), "%02X", value);
-            edit_entry_->setText(text);
+        viewer_widget_->onSelectionChanged = [this](const std::vector<size_t> &selection) {
+            onSelectionChanged(selection);
         };
         viewer_widget_->onSearchStatusUpdated = [this]() {
-            updateStatus(std::numeric_limits<size_t>::max(), 0);
+            updateStatus();
         };
 
         connect(auto_refresh_, &QCheckBox::toggled, viewer_widget_, [this](bool checked) {
@@ -887,7 +1159,12 @@ public:
             }
         });
 
+        connect(annotation_editor_, &QTextEdit::textChanged, this, [this]() {
+            onAnnotationEdited();
+        });
+
         updateStatus(std::numeric_limits<size_t>::max(), 0);
+        updateAnnotationUi();
     }
 
     ~MemViewerWindow() override {
@@ -895,6 +1172,30 @@ public:
     }
 
 private:
+    void createMenus() {
+        QMenu *file_menu = menuBar()->addMenu("&File");
+        QAction *select_annotations = file_menu->addAction("Select Annotation File...");
+        connect(select_annotations, &QAction::triggered, this, [this]() {
+            const QString path = QFileDialog::getSaveFileName(
+                this,
+                QStringLiteral("Select Annotation File"),
+                annotation_store_.hasFilePath() ? annotation_store_.filePath() : QString(),
+                QStringLiteral("JSON Files (*.json);;All Files (*)"));
+            if (path.isEmpty()) {
+                return;
+            }
+
+            QString error_message;
+            if (!annotation_store_.selectFile(path, &error_message)) {
+                QMessageBox::warning(this, QStringLiteral("Annotations"), error_message);
+                return;
+            }
+
+            updateAnnotationUi();
+            updateStatus();
+        });
+    }
+
     void rebuildSearch() {
         if (!viewer_widget_) return;
         
@@ -917,15 +1218,84 @@ private:
         viewer_widget_->applyEdit(value);
     }
 
-    void updateStatus(size_t index, uint8_t value) {
+    void onSelectionChanged(const std::vector<size_t> &selection) {
+        current_selection_ = selection;
+
+        const size_t single_index = viewer_widget_ ? viewer_widget_->getSelectedIndex() : std::numeric_limits<size_t>::max();
+        if (single_index < std::numeric_limits<size_t>::max()) {
+            const uint8_t value = viewer_widget_->getSelectedValue();
+            char text[8];
+            std::snprintf(text, sizeof(text), "%02X", value);
+            edit_entry_->setText(text);
+        } else {
+            edit_entry_->clear();
+        }
+
+        edit_entry_->setEnabled(selection.size() == 1);
+        apply_button_->setEnabled(selection.size() == 1);
+        updateAnnotationUi();
+        updateStatus();
+    }
+
+    void updateAnnotationUi() {
+        annotation_selection_label_->setText(selection_summary_text(current_selection_));
+
+        if (annotation_store_.hasFilePath()) {
+            annotation_file_label_->setText(QStringLiteral("Annotation file: %1").arg(annotation_store_.filePath()));
+        } else {
+            annotation_file_label_->setText(QStringLiteral("Annotation file: not selected"));
+        }
+
+        const bool can_edit = !current_selection_.empty();
+        annotation_editor_->setEnabled(can_edit);
+
+        const QString note = QString::fromStdString(annotation_store_.noteForSelection(current_selection_));
+        const bool blocked = annotation_editor_->blockSignals(true);
+        annotation_editor_->setPlainText(note);
+        annotation_editor_->blockSignals(blocked);
+    }
+
+    void onAnnotationEdited() {
+        if (current_selection_.empty()) {
+            return;
+        }
+
+        if (!annotation_store_.hasFilePath()) {
+            updateStatus();
+            return;
+        }
+
+        QString error_message;
+        if (!annotation_store_.setAnnotation(current_selection_, annotation_editor_->toPlainText().toStdString(), &error_message)) {
+            QMessageBox::warning(this, QStringLiteral("Annotations"), error_message);
+        }
+        updateStatus();
+    }
+
+    void updateStatus(size_t index = std::numeric_limits<size_t>::max(), uint8_t value = 0) {
         if (!viewer_widget_) return;
         
+        if (index >= viewer_widget_->getMemorySize()) {
+            if (current_selection_.size() == 1) {
+                index = current_selection_.front();
+                value = viewer_widget_->getSelectedValue();
+            }
+        }
+
         if (index >= viewer_widget_->getMemorySize()) {
             std::ostringstream ss;
             ss << "Buffer size: " << viewer_widget_->getMemorySize() << " bytes";
             const size_t match_count = viewer_widget_->getMatchCount();
             if (match_count > 0) {
                 ss << " | Matches: " << match_count;
+            }
+            if (!current_selection_.empty()) {
+                ss << " | Selected: " << current_selection_.size();
+            }
+            if (annotation_store_.hasFilePath()) {
+                ss << " | Notes: autosaved";
+            } else if (!current_selection_.empty()) {
+                ss << " | Pick annotation file in File menu";
             }
             status_label_->setText(QString::fromStdString(ss.str()));
             return;
@@ -956,7 +1326,12 @@ private:
     QPushButton *next_button_;
     QLineEdit *edit_entry_;
     QPushButton *apply_button_;
+    QLabel *annotation_selection_label_;
+    QLabel *annotation_file_label_;
+    QTextEdit *annotation_editor_;
     QLabel *status_label_;
+    AnnotationStore annotation_store_;
+    std::vector<size_t> current_selection_;
 };
 
 }  // namespace
