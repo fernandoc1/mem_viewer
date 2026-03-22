@@ -1340,11 +1340,17 @@ public:
         });
         connect(prev_button_, &QPushButton::clicked, this, [this]() {
             if (viewer_widget_) {
+                if (viewer_widget_->getMatchCount() == 0 || searchNeedsRebuild()) {
+                    rebuildSearch();
+                }
                 viewer_widget_->navigateMatch(-1);
             }
         });
         connect(next_button_, &QPushButton::clicked, this, [this]() {
             if (viewer_widget_) {
+                if (viewer_widget_->getMatchCount() == 0 || searchNeedsRebuild()) {
+                    rebuildSearch();
+                }
                 viewer_widget_->navigateMatch(1);
             }
         });
@@ -1526,6 +1532,20 @@ private:
         const size_t width = static_cast<size_t>(width_combo_->currentText().toULongLong());
         
         viewer_widget_->rebuildSearch(search_text, format, endian, width);
+        last_search_signature_ = currentSearchSignature();
+    }
+
+    std::string currentSearchSignature() const {
+        std::ostringstream ss;
+        ss << search_entry_->text().toStdString() << '|'
+           << format_combo_->currentIndex() << '|'
+           << width_combo_->currentText().toStdString() << '|'
+           << endian_combo_->currentIndex();
+        return ss.str();
+    }
+
+    bool searchNeedsRebuild() const {
+        return currentSearchSignature() != last_search_signature_;
     }
 
     void applyEdit() {
@@ -1702,6 +1722,7 @@ private:
     AnnotationStore annotation_store_;
     AnnotationStore::ResolvedAnnotation active_annotation_;
     std::vector<size_t> current_selection_;
+    std::string last_search_signature_;
 };
 
 }  // namespace
