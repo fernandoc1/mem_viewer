@@ -172,6 +172,49 @@ static bool parse_uint64_value(const std::string &text, SearchFormat format, uin
     return true;
 }
 
+static bool parse_hex_byte_sequence(const std::string &text, size_t width, std::vector<uint8_t> &pattern) {
+    const std::string trimmed = trim_copy(text);
+    if (trimmed.empty()) {
+        return false;
+    }
+
+    std::vector<uint8_t> parsed_bytes;
+
+    if (trimmed.find_first_of(" \t\r\n,;:-") != std::string::npos) {
+        std::istringstream input(trimmed);
+        std::string token;
+        while (input >> token) {
+            uint8_t value = 0;
+            if (!parse_byte_value(token, value)) {
+                return false;
+            }
+            parsed_bytes.push_back(value);
+        }
+    } else {
+        std::string digits = trimmed;
+        if (digits.size() > 2 && digits[0] == '0' && (digits[1] == 'x' || digits[1] == 'X')) {
+            digits = digits.substr(2);
+        }
+        if (digits.size() != width * 2) {
+            return false;
+        }
+        for (size_t i = 0; i < digits.size(); i += 2) {
+            uint8_t value = 0;
+            if (!parse_byte_value(digits.substr(i, 2), value)) {
+                return false;
+            }
+            parsed_bytes.push_back(value);
+        }
+    }
+
+    if (parsed_bytes.size() != width) {
+        return false;
+    }
+
+    pattern = std::move(parsed_bytes);
+    return true;
+}
+
 static QString selection_summary_text(const std::vector<size_t> &positions) {
     if (positions.empty()) {
         return QStringLiteral("No bytes selected");
@@ -692,13 +735,6 @@ public:
         matches_.clear();
         active_match_index_ = 0;
 
-        uint64_t value = 0;
-        if (!parse_uint64_value(search_text, format, value)) {
-            update();
-            if (onSearchStatusUpdated) onSearchStatusUpdated();
-            return;
-        }
-
         if (width == 0 || width > 8 || width > memory_size_) {
             update();
             if (onSearchStatusUpdated) onSearchStatusUpdated();
@@ -706,13 +742,24 @@ public:
         }
 
         std::vector<uint8_t> pattern(width);
-        if (endian == EndianMode::Little) {
-            for (size_t i = 0; i < width; ++i) {
-                pattern[i] = static_cast<uint8_t>((value >> (8 * i)) & 0xffU);
-            }
+        if (format == SearchFormat::Hex && parse_hex_byte_sequence(search_text, width, pattern)) {
+            // Explicit byte sequences are already in the typed search order.
         } else {
-            for (size_t i = 0; i < width; ++i) {
-                pattern[width - 1 - i] = static_cast<uint8_t>((value >> (8 * i)) & 0xffU);
+            uint64_t value = 0;
+            if (!parse_uint64_value(search_text, format, value)) {
+                update();
+                if (onSearchStatusUpdated) onSearchStatusUpdated();
+                return;
+            }
+
+            if (endian == EndianMode::Little) {
+                for (size_t i = 0; i < width; ++i) {
+                    pattern[i] = static_cast<uint8_t>((value >> (8 * i)) & 0xffU);
+                }
+            } else {
+                for (size_t i = 0; i < width; ++i) {
+                    pattern[width - 1 - i] = static_cast<uint8_t>((value >> (8 * i)) & 0xffU);
+                }
             }
         }
 
