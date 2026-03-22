@@ -2,6 +2,7 @@
 
 #include <QApplication>
 #include <QCheckBox>
+#include <QClipboard>
 #include <QComboBox>
 #include <QFrame>
 #include <QHBoxLayout>
@@ -26,6 +27,7 @@
 #include <QMenuBar>
 #include <QMessageBox>
 #include <QMouseEvent>
+#include <QKeySequence>
 #include <QSignalBlocker>
 #include <QTextEdit>
 #include <QWheelEvent>
@@ -813,6 +815,55 @@ public:
         refreshVisibleBytes();
     }
 
+    std::string selectedContentText() const {
+        if (selected_indices_.empty()) {
+            return {};
+        }
+
+        std::vector<uint8_t> values(selected_indices_.size(), 0);
+        for (size_t i = 0; i < selected_indices_.size(); ++i) {
+            const size_t index = selected_indices_[i];
+            uint8_t value = last_seen_[index];
+            if (read_memory_(index, &value, 1)) {
+                values[i] = value;
+            } else {
+                values[i] = value;
+            }
+        }
+
+        std::ostringstream ss;
+        size_t i = 0;
+        while (i < selected_indices_.size()) {
+            const size_t row = selected_indices_[i] / kBytesPerRow;
+            const size_t row_base = row * kBytesPerRow;
+            if (i > 0) {
+                ss << '\n';
+            }
+
+            ss << std::hex << std::uppercase;
+            ss.width(8);
+            ss.fill('0');
+            ss << row_base << ": ";
+
+            std::string ascii;
+            bool first_in_row = true;
+            while (i < selected_indices_.size() && (selected_indices_[i] / kBytesPerRow) == row) {
+                if (!first_in_row) {
+                    ss << ' ';
+                }
+                first_in_row = false;
+                ss.width(2);
+                ss.fill('0');
+                ss << static_cast<unsigned>(values[i]);
+                ascii.push_back(printable(values[i]));
+                ++i;
+            }
+            ss << "  |" << ascii << '|';
+        }
+
+        return ss.str();
+    }
+
     void setAnnotatedPositions(const std::set<size_t> &positions) {
         std::fill(annotation_mask_.begin(), annotation_mask_.end(), 0);
         for (size_t index : positions) {
@@ -1444,6 +1495,14 @@ private:
             }
             selectAnnotationFile(selected_files.front());
         });
+
+        QMenu *edit_menu = menuBar()->addMenu("&Edit");
+        QAction *copy_selection = edit_menu->addAction("Copy Selection");
+        copy_selection->setShortcut(QKeySequence::Copy);
+        connect(copy_selection, &QAction::triggered, this, [this]() {
+            copySelectionToClipboard();
+        });
+        addAction(copy_selection);
     }
 
     void selectAnnotationFile(const QString &path) {
@@ -1562,6 +1621,21 @@ private:
         }
         if (note_scroll_bar_) {
             note_scroll_bar_->setAnnotatedPositions(annotated_positions);
+        }
+    }
+
+    void copySelectionToClipboard() {
+        if (!viewer_widget_) {
+            return;
+        }
+
+        const std::string text = viewer_widget_->selectedContentText();
+        if (text.empty()) {
+            return;
+        }
+
+        if (QClipboard *clipboard = QApplication::clipboard()) {
+            clipboard->setText(QString::fromStdString(text));
         }
     }
 
