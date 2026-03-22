@@ -981,10 +981,10 @@ protected:
                         a = static_cast<int>(255 * (0.16 + 0.42 * fade));
                     }
                     if (matched) {
-                        r = 0.85;
-                        g = 0.72;
-                        b = 0.12;
-                        a = std::max(a, static_cast<int>(255 * 0.24));
+                        r = 0.96;
+                        g = 0.79;
+                        b = 0.18;
+                        a = std::max(a, static_cast<int>(255 * 0.42));
                     }
                     if (selected) {
                         r = 0.22;
@@ -1001,11 +1001,25 @@ protected:
 
                 char hex[4];
                 std::snprintf(hex, sizeof(hex), "%02X", value);
+                QColor hex_color(0xEE, 0xEE, 0xEF);
+                QColor ascii_color(0xCD, 0xDB, 0xE2);
+                if (annotated) {
+                    hex_color = QColor(0x72, 0xE6, 0x7A);
+                    ascii_color = QColor(0x72, 0xE6, 0x7A);
+                }
+                if (matched) {
+                    hex_color = QColor(0xFF, 0xF4, 0xB0);
+                    ascii_color = QColor(0xFF, 0xF4, 0xB0);
+                }
+                if (selected) {
+                    hex_color = QColor(0xFF, 0xFF, 0xFF);
+                    ascii_color = QColor(0xFF, 0xFF, 0xFF);
+                }
                 drawText(
                     painter,
                     cell_x,
                     y + baseline_y_,
-                    annotated ? QColor(0x72, 0xE6, 0x7A) : QColor(0xEE, 0xEE, 0xEF),
+                    hex_color,
                     hex);
 
                 char ascii[2] = { printable(value), '\0' };
@@ -1013,7 +1027,7 @@ protected:
                     painter,
                     ascii_x,
                     y + baseline_y_,
-                    annotated ? QColor(0x72, 0xE6, 0x7A) : QColor(0xCD, 0xDB, 0xE2),
+                    ascii_color,
                     ascii);
             }
         }
