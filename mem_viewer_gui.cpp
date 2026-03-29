@@ -172,6 +172,49 @@ static bool parse_uint64_value(const std::string &text, SearchFormat format, uin
     return true;
 }
 
+static bool parse_hex_byte_sequence(const std::string &text, size_t width, std::vector<uint8_t> &pattern) {
+    const std::string trimmed = trim_copy(text);
+    if (trimmed.empty()) {
+        return false;
+    }
+
+    std::vector<uint8_t> parsed_bytes;
+
+    if (trimmed.find_first_of(" \t\r\n,;:-") != std::string::npos) {
+        std::istringstream input(trimmed);
+        std::string token;
+        while (input >> token) {
+            uint8_t value = 0;
+            if (!parse_byte_value(token, value)) {
+                return false;
+            }
+            parsed_bytes.push_back(value);
+        }
+    } else {
+        std::string digits = trimmed;
+        if (digits.size() > 2 && digits[0] == '0' && (digits[1] == 'x' || digits[1] == 'X')) {
+            digits = digits.substr(2);
+        }
+        if (digits.size() != width * 2) {
+            return false;
+        }
+        for (size_t i = 0; i < digits.size(); i += 2) {
+            uint8_t value = 0;
+            if (!parse_byte_value(digits.substr(i, 2), value)) {
+                return false;
+            }
+            parsed_bytes.push_back(value);
+        }
+    }
+
+    if (parsed_bytes.size() != width) {
+        return false;
+    }
+
+    pattern = std::move(parsed_bytes);
+    return true;
+}
+
 static QString selection_summary_text(const std::vector<size_t> &positions) {
     if (positions.empty()) {
         return QStringLiteral("No bytes selected");
@@ -692,13 +735,6 @@ public:
         matches_.clear();
         active_match_index_ = 0;
 
-        uint64_t value = 0;
-        if (!parse_uint64_value(search_text, format, value)) {
-            update();
-            if (onSearchStatusUpdated) onSearchStatusUpdated();
-            return;
-        }
-
         if (width == 0 || width > 8 || width > memory_size_) {
             update();
             if (onSearchStatusUpdated) onSearchStatusUpdated();
@@ -706,13 +742,24 @@ public:
         }
 
         std::vector<uint8_t> pattern(width);
-        if (endian == EndianMode::Little) {
-            for (size_t i = 0; i < width; ++i) {
-                pattern[i] = static_cast<uint8_t>((value >> (8 * i)) & 0xffU);
-            }
+        if (format == SearchFormat::Hex && parse_hex_byte_sequence(search_text, width, pattern)) {
+            // Explicit byte sequences are already in the typed search order.
         } else {
-            for (size_t i = 0; i < width; ++i) {
-                pattern[width - 1 - i] = static_cast<uint8_t>((value >> (8 * i)) & 0xffU);
+            uint64_t value = 0;
+            if (!parse_uint64_value(search_text, format, value)) {
+                update();
+                if (onSearchStatusUpdated) onSearchStatusUpdated();
+                return;
+            }
+
+            if (endian == EndianMode::Little) {
+                for (size_t i = 0; i < width; ++i) {
+                    pattern[i] = static_cast<uint8_t>((value >> (8 * i)) & 0xffU);
+                }
+            } else {
+                for (size_t i = 0; i < width; ++i) {
+                    pattern[width - 1 - i] = static_cast<uint8_t>((value >> (8 * i)) & 0xffU);
+                }
             }
         }
 
@@ -934,10 +981,10 @@ protected:
                         a = static_cast<int>(255 * (0.16 + 0.42 * fade));
                     }
                     if (matched) {
-                        r = 0.85;
-                        g = 0.72;
-                        b = 0.12;
-                        a = std::max(a, static_cast<int>(255 * 0.24));
+                        r = 0.96;
+                        g = 0.79;
+                        b = 0.18;
+                        a = std::max(a, static_cast<int>(255 * 0.42));
                     }
                     if (selected) {
                         r = 0.22;
@@ -954,11 +1001,25 @@ protected:
 
                 char hex[4];
                 std::snprintf(hex, sizeof(hex), "%02X", value);
+                QColor hex_color(0xEE, 0xEE, 0xEF);
+                QColor ascii_color(0xCD, 0xDB, 0xE2);
+                if (annotated) {
+                    hex_color = QColor(0x72, 0xE6, 0x7A);
+                    ascii_color = QColor(0x72, 0xE6, 0x7A);
+                }
+                if (matched) {
+                    hex_color = QColor(0xFF, 0xF4, 0xB0);
+                    ascii_color = QColor(0xFF, 0xF4, 0xB0);
+                }
+                if (selected) {
+                    hex_color = QColor(0xFF, 0xFF, 0xFF);
+                    ascii_color = QColor(0xFF, 0xFF, 0xFF);
+                }
                 drawText(
                     painter,
                     cell_x,
                     y + baseline_y_,
-                    annotated ? QColor(0x72, 0xE6, 0x7A) : QColor(0xEE, 0xEE, 0xEF),
+                    hex_color,
                     hex);
 
                 char ascii[2] = { printable(value), '\0' };
@@ -966,7 +1027,7 @@ protected:
                     painter,
                     ascii_x,
                     y + baseline_y_,
-                    annotated ? QColor(0x72, 0xE6, 0x7A) : QColor(0xCD, 0xDB, 0xE2),
+                    ascii_color,
                     ascii);
             }
         }
