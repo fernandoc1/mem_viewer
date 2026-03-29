@@ -13,6 +13,7 @@
 #include <QScrollBar>
 #include <QStyle>
 #include <QStyleOptionSlider>
+#include <QTabWidget>
 #include <QTimer>
 #include <QVBoxLayout>
 #include <QWidget>
@@ -169,6 +170,34 @@ static bool parse_uint64_value(const std::string &text, SearchFormat format, uin
         return false;
     }
     value = static_cast<uint64_t>(parsed);
+    return true;
+}
+
+static bool parse_memory_position(const std::string &text, size_t limit, size_t &value) {
+    const std::string trimmed = trim_copy(text);
+    if (trimmed.empty()) {
+        return false;
+    }
+
+    uint64_t parsed = 0;
+    const bool explicit_hex = trimmed.size() > 2 && trimmed[0] == '0' && (trimmed[1] == 'x' || trimmed[1] == 'X');
+    bool has_hex_alpha = false;
+    for (char c : trimmed) {
+        if ((c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
+            has_hex_alpha = true;
+            break;
+        }
+    }
+
+    const SearchFormat format = (explicit_hex || has_hex_alpha) ? SearchFormat::Hex : SearchFormat::Decimal;
+    if (!parse_uint64_value(trimmed, format, parsed)) {
+        return false;
+    }
+    if (parsed >= static_cast<uint64_t>(limit)) {
+        return false;
+    }
+
+    value = static_cast<size_t>(parsed);
     return true;
 }
 
@@ -825,6 +854,16 @@ public:
         update();
     }
 
+    bool jumpToIndex(size_t index) {
+        if (index >= memory_size_) {
+            return false;
+        }
+        setSelectedIndex(index);
+        scroll_to_index(index);
+        refreshVisibleBytes();
+        return true;
+    }
+
     size_t getSelectedIndex() const {
         return selected_indices_.size() == 1 ? selected_indices_.front() : std::numeric_limits<size_t>::max();
     }
@@ -1330,10 +1369,16 @@ public:
         side_panel->setFixedWidth(260);
         QVBoxLayout *side_layout = new QVBoxLayout(side_panel);
         side_layout->setSpacing(8);
+        QTabWidget *side_tabs = new QTabWidget();
+
+        QWidget *inspect_tab = new QWidget();
+        QVBoxLayout *inspect_layout = new QVBoxLayout(inspect_tab);
+        inspect_layout->setContentsMargins(0, 0, 0, 0);
+        inspect_layout->setSpacing(8);
 
         auto_refresh_ = new QCheckBox("Auto refresh");
         auto_refresh_->setChecked(true);
-        
+
         refresh_button_ = new QPushButton("Refresh");
         connect(refresh_button_, &QPushButton::clicked, this, [this]() {
             if (viewer_widget_) {
@@ -1348,7 +1393,57 @@ public:
         refresh_layout->setSpacing(6);
         refresh_layout->addWidget(auto_refresh_);
         refresh_layout->addWidget(refresh_button_);
-        side_layout->addWidget(refresh_frame);
+        inspect_layout->addWidget(refresh_frame);
+
+        QFrame *goto_frame = new QFrame();
+        goto_frame->setFrameStyle(QFrame::Box | QFrame::Raised);
+        QVBoxLayout *goto_layout = new QVBoxLayout(goto_frame);
+        goto_layout->setContentsMargins(8, 8, 8, 8);
+        goto_layout->setSpacing(6);
+        goto_layout->addWidget(new QLabel("Go to position"));
+        goto_entry_ = new QLineEdit();
+        goto_entry_->setPlaceholderText("0x1234 or 4660");
+        goto_layout->addWidget(goto_entry_);
+        goto_button_ = new QPushButton("Go");
+        goto_layout->addWidget(goto_button_);
+        inspect_layout->addWidget(goto_frame);
+
+        connect(goto_entry_, &QLineEdit::returnPressed, this, [this]() {
+            goToPosition();
+        });
+        connect(goto_button_, &QPushButton::clicked, this, [this]() {
+            goToPosition();
+        });
+
+        QFrame *edit_frame = new QFrame();
+        edit_frame->setFrameStyle(QFrame::Box | QFrame::Raised);
+        QVBoxLayout *edit_layout = new QVBoxLayout(edit_frame);
+        edit_layout->setContentsMargins(8, 8, 8, 8);
+        edit_layout->setSpacing(6);
+
+        edit_layout->addWidget(new QLabel("Selected byte"));
+        edit_entry_ = new QLineEdit();
+        edit_entry_->setPlaceholderText("Selected byte: hex or decimal");
+        edit_layout->addWidget(edit_entry_);
+
+        apply_button_ = new QPushButton("Write byte");
+        connect(apply_button_, &QPushButton::clicked, this, [this]() {
+            applyEdit();
+        });
+        edit_layout->addWidget(apply_button_);
+
+        connect(edit_entry_, &QLineEdit::returnPressed, this, [this]() {
+            applyEdit();
+        });
+
+        inspect_layout->addWidget(edit_frame);
+        inspect_layout->addStretch();
+        side_tabs->addTab(inspect_tab, "Inspect");
+
+        QWidget *search_tab = new QWidget();
+        QVBoxLayout *search_tab_layout = new QVBoxLayout(search_tab);
+        search_tab_layout->setContentsMargins(0, 0, 0, 0);
+        search_tab_layout->setSpacing(8);
 
         QFrame *search_frame = new QFrame();
         search_frame->setFrameStyle(QFrame::Box | QFrame::Raised);
@@ -1386,6 +1481,9 @@ public:
         search_nav->addWidget(prev_button_);
         search_nav->addWidget(next_button_);
         search_layout->addLayout(search_nav);
+        search_tab_layout->addWidget(search_frame);
+        search_tab_layout->addStretch();
+        side_tabs->addTab(search_tab, "Search");
 
         connect(search_entry_, &QLineEdit::returnPressed, this, [this]() {
             rebuildSearch();
@@ -1416,30 +1514,10 @@ public:
             }
         });
 
-        side_layout->addWidget(search_frame);
-
-        QFrame *edit_frame = new QFrame();
-        edit_frame->setFrameStyle(QFrame::Box | QFrame::Raised);
-        QVBoxLayout *edit_layout = new QVBoxLayout(edit_frame);
-        edit_layout->setContentsMargins(8, 8, 8, 8);
-        edit_layout->setSpacing(6);
-
-        edit_layout->addWidget(new QLabel("Selected byte"));
-        edit_entry_ = new QLineEdit();
-        edit_entry_->setPlaceholderText("Selected byte: hex or decimal");
-        edit_layout->addWidget(edit_entry_);
-
-        apply_button_ = new QPushButton("Write byte");
-        connect(apply_button_, &QPushButton::clicked, this, [this]() {
-            applyEdit();
-        });
-        edit_layout->addWidget(apply_button_);
-
-        connect(edit_entry_, &QLineEdit::returnPressed, this, [this]() {
-            applyEdit();
-        });
-
-        side_layout->addWidget(edit_frame);
+        QWidget *notes_tab = new QWidget();
+        QVBoxLayout *notes_layout = new QVBoxLayout(notes_tab);
+        notes_layout->setContentsMargins(0, 0, 0, 0);
+        notes_layout->setSpacing(8);
 
         QFrame *annotation_frame = new QFrame();
         annotation_frame->setFrameStyle(QFrame::Box | QFrame::Raised);
@@ -1463,7 +1541,11 @@ public:
         clear_annotation_button_ = new QPushButton("Clear selected annotations");
         clear_annotation_button_->setEnabled(false);
         annotation_layout->addWidget(clear_annotation_button_);
-        side_layout->addWidget(annotation_frame);
+        notes_layout->addWidget(annotation_frame);
+        notes_layout->addStretch();
+        side_tabs->addTab(notes_tab, "Notes");
+
+        side_layout->addWidget(side_tabs);
 
         QFrame *status_frame = new QFrame();
         status_frame->setFrameStyle(QFrame::Box | QFrame::Raised);
@@ -1620,6 +1702,24 @@ private:
         viewer_widget_->applyEdit(value);
     }
 
+    void goToPosition() {
+        if (!viewer_widget_) {
+            return;
+        }
+
+        size_t index = 0;
+        if (!parse_memory_position(goto_entry_->text().toStdString(), viewer_widget_->getMemorySize(), index)) {
+            QMessageBox::warning(
+                this,
+                QStringLiteral("Go to position"),
+                QStringLiteral("Enter a valid byte offset within 0 to %1.")
+                    .arg(viewer_widget_->getMemorySize() == 0 ? 0 : viewer_widget_->getMemorySize() - 1));
+            return;
+        }
+
+        viewer_widget_->jumpToIndex(index);
+    }
+
     void onSelectionChanged(const std::vector<size_t> &selection) {
         current_selection_ = selection;
 
@@ -1767,6 +1867,8 @@ private:
     NoteScrollBar *note_scroll_bar_;
     QCheckBox *auto_refresh_;
     QPushButton *refresh_button_;
+    QLineEdit *goto_entry_;
+    QPushButton *goto_button_;
     QLineEdit *search_entry_;
     QComboBox *format_combo_;
     QComboBox *width_combo_;
