@@ -296,6 +296,18 @@ static QString annotation_color_button_style(const QColor &color) {
         .arg(safe_color.name(QColor::HexRgb), text_color.name(QColor::HexRgb));
 }
 
+static std::vector<QString> split_note_file_list(const QString &value) {
+    std::vector<QString> paths;
+    const QStringList raw_parts = value.split(QLatin1Char(':'), Qt::SkipEmptyParts);
+    for (const QString &raw_part : raw_parts) {
+        const QString trimmed = raw_part.trimmed();
+        if (!trimmed.isEmpty()) {
+            paths.push_back(trimmed);
+        }
+    }
+    return paths;
+}
+
 class AnnotationStore {
 public:
     struct ResolvedAnnotation {
@@ -1617,6 +1629,7 @@ public:
             updateStatus();
         });
 
+        loadNoteFilesFromEnvironment();
         refreshAnnotationHighlights();
         updateStatus(std::numeric_limits<size_t>::max(), 0);
         updateAnnotationUi();
@@ -1754,7 +1767,10 @@ private:
             clearSelectedAnnotations(raw);
         });
 
-        const QString tab_name = QFileInfo(path).fileName().isEmpty() ? path : QFileInfo(path).fileName();
+        const QFileInfo file_info(path);
+        const QString tab_name = file_info.completeBaseName().isEmpty()
+            ? (file_info.fileName().isEmpty() ? path : file_info.fileName())
+            : file_info.completeBaseName();
         const int new_index = notes_file_tabs_->addTab(note_tab->page, tab_name);
         note_tabs_.push_back(std::move(note_tab));
         notes_file_tabs_->setCurrentIndex(new_index);
@@ -1762,6 +1778,18 @@ private:
         refreshAnnotationHighlights();
         updateAnnotationUi();
         updateStatus();
+    }
+
+    void loadNoteFilesFromEnvironment() {
+        const char *env_value = std::getenv("MEM_VIEWER_NOTES");
+        if (env_value == nullptr || env_value[0] == '\0') {
+            return;
+        }
+
+        const std::vector<QString> note_paths = split_note_file_list(QString::fromLocal8Bit(env_value));
+        for (const QString &path : note_paths) {
+            selectAnnotationFile(path);
+        }
     }
 
     void rebuildSearch() {

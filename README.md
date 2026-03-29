@@ -21,6 +21,7 @@
 - Go-to memory position by byte offset
 - Notes/annotations stored in JSON
 - Per-note highlight colors persisted to disk
+- Multiple note JSON files loaded at once
 - Tabbed side pane organized by feature
 
 ### Binary Compare
@@ -173,6 +174,20 @@ Example:
 ```
 
 Older annotation files without `color` still load; they default to the original green highlight.
+
+## Environment Variables
+
+### `MEM_VIEWER_NOTES`
+
+Automatically loads note files when the memory viewer starts. Use `:` as the file separator.
+
+Example:
+
+```bash
+MEM_VIEWER_NOTES="notes/main.json:notes/bosses.json:notes/debug.json" ./test_c
+```
+
+Each loaded file appears as its own tab in the Notes view. The active tab is the working note file used for edits and saves.
 
 ## Debugging
 
