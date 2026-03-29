@@ -3,6 +3,7 @@
 #include <QApplication>
 #include <QCheckBox>
 #include <QClipboard>
+#include <QColorDialog>
 #include <QComboBox>
 #include <QFrame>
 #include <QHBoxLayout>
@@ -93,9 +94,12 @@ constexpr double kAddressCharWidth = 7.0;
 constexpr double kGapAddressToHex = 6.0;
 constexpr double kGapHexToAscii = 6.0;
 
+static const QColor kDefaultAnnotationColor(0x72, 0xE6, 0x7A);
+
 struct AnnotationEntry {
     std::vector<size_t> positions;
     std::string note;
+    QColor color = kDefaultAnnotationColor;
 };
 
 enum class SearchFormat {
@@ -270,11 +274,33 @@ static QString selection_summary_text(const std::vector<size_t> &positions) {
     return QString::fromStdString(ss.str());
 }
 
+static QColor annotation_color_from_json(const QJsonValue &value) {
+    if (!value.isString()) {
+        return kDefaultAnnotationColor;
+    }
+
+    const QColor color(value.toString());
+    return color.isValid() ? color : kDefaultAnnotationColor;
+}
+
+static QString annotation_color_to_json(const QColor &color) {
+    const QColor safe_color = color.isValid() ? color : kDefaultAnnotationColor;
+    return safe_color.name(QColor::HexRgb);
+}
+
+static QString annotation_color_button_style(const QColor &color) {
+    const QColor safe_color = color.isValid() ? color : kDefaultAnnotationColor;
+    const QColor text_color = safe_color.lightness() < 128 ? QColor(Qt::white) : QColor(Qt::black);
+    return QStringLiteral("QPushButton { background-color: %1; color: %2; }")
+        .arg(safe_color.name(QColor::HexRgb), text_color.name(QColor::HexRgb));
+}
+
 class AnnotationStore {
 public:
     struct ResolvedAnnotation {
         std::vector<size_t> positions;
         std::string note;
+        QColor color = kDefaultAnnotationColor;
 
         bool isValid() const {
             return !positions.empty();
@@ -344,6 +370,7 @@ public:
             AnnotationEntry entry;
             entry.positions.assign(unique_positions.begin(), unique_positions.end());
             entry.note = entry_object.value(QStringLiteral("note")).toString().toStdString();
+            entry.color = annotation_color_from_json(entry_object.value(QStringLiteral("color")));
             annotations_.push_back(std::move(entry));
         }
 
@@ -357,7 +384,7 @@ public:
 
         for (const AnnotationEntry &entry : annotations_) {
             if (entry.positions == positions) {
-                return {entry.positions, entry.note};
+                return {entry.positions, entry.note, entry.color};
             }
         }
 
@@ -374,10 +401,10 @@ public:
         if (best_match == nullptr) {
             return {};
         }
-        return {best_match->positions, best_match->note};
+        return {best_match->positions, best_match->note, best_match->color};
     }
 
-    bool setAnnotation(const std::vector<size_t> &positions, const std::string &note, QString *error_message = nullptr) {
+    bool setAnnotation(const std::vector<size_t> &positions, const std::string &note, const QColor &color, QString *error_message = nullptr) {
         if (positions.empty()) {
             return true;
         }
@@ -389,6 +416,7 @@ public:
             AnnotationEntry entry;
             entry.positions = normalized_positions;
             entry.note = note;
+            entry.color = color.isValid() ? color : kDefaultAnnotationColor;
             annotations_.push_back(std::move(entry));
         }
         return save(error_message);
@@ -403,10 +431,12 @@ public:
         return save(error_message);
     }
 
-    std::set<size_t> annotatedPositions() const {
-        std::set<size_t> positions;
+    std::map<size_t, QColor> annotatedPositions() const {
+        std::map<size_t, QColor> positions;
         for (const AnnotationEntry &entry : annotations_) {
-            positions.insert(entry.positions.begin(), entry.positions.end());
+            for (size_t position : entry.positions) {
+                positions[position] = entry.color;
+            }
         }
         return positions;
     }
@@ -457,7 +487,11 @@ private:
                 continue;
             }
 
-            updated_annotations.push_back({remaining_positions, entry.note});
+            AnnotationEntry updated_entry;
+            updated_entry.positions = std::move(remaining_positions);
+            updated_entry.note = entry.note;
+            updated_entry.color = entry.color;
+            updated_annotations.push_back(std::move(updated_entry));
         }
 
         annotations_ = std::move(updated_annotations);
@@ -477,6 +511,7 @@ private:
             }
             object.insert(QStringLiteral("positions"), positions);
             object.insert(QStringLiteral("note"), QString::fromStdString(entry.note));
+            object.insert(QStringLiteral("color"), annotation_color_to_json(entry.color));
             annotation_array.append(object);
         }
 
@@ -509,7 +544,7 @@ public:
         update();
     }
 
-    void setAnnotatedPositions(const std::set<size_t> &positions) {
+    void setAnnotatedPositions(const std::map<size_t, QColor> &positions) {
         annotated_positions_ = positions;
         update();
     }
@@ -532,10 +567,10 @@ protected:
         QPainter painter(this);
         painter.setRenderHint(QPainter::Antialiasing, false);
         painter.setPen(Qt::NoPen);
-        painter.setBrush(QColor(0x72, 0xE6, 0x7A, 220));
+        painter.setBrush(kDefaultAnnotationColor);
 
         int previous_y = std::numeric_limits<int>::min();
-        for (size_t position : annotated_positions_) {
+        for (const auto &[position, color] : annotated_positions_) {
             const double ratio = static_cast<double>(position) / static_cast<double>(memory_size_);
             int y = groove.top() + static_cast<int>(std::floor(ratio * static_cast<double>(groove.height() - 1)));
             y = std::clamp(y, groove.top(), groove.bottom());
@@ -543,13 +578,16 @@ protected:
                 continue;
             }
             previous_y = y;
+            QColor marker_color = color.isValid() ? color : kDefaultAnnotationColor;
+            marker_color.setAlpha(220);
+            painter.setBrush(marker_color);
             painter.drawRect(QRect(groove.left() + 1, y, std::max(2, groove.width() - 2), 2));
         }
     }
 
 private:
     size_t memory_size_ = 0;
-    std::set<size_t> annotated_positions_;
+    std::map<size_t, QColor> annotated_positions_;
 };
 
 class RemoteMemory {
@@ -662,7 +700,7 @@ public:
           last_seen_(memory_size_, 0),
           changed_at_(memory_size_, -1.0),
           match_mask_(memory_size_, 0),
-          annotation_mask_(memory_size_, 0),
+          annotation_colors_(memory_size_, 0U),
           selection_mask_(memory_size_, 0),
           font_("Monospace", 11) {
         
@@ -950,11 +988,11 @@ public:
         return ss.str();
     }
 
-    void setAnnotatedPositions(const std::set<size_t> &positions) {
-        std::fill(annotation_mask_.begin(), annotation_mask_.end(), 0);
-        for (size_t index : positions) {
-            if (index < annotation_mask_.size()) {
-                annotation_mask_[index] = 1;
+    void setAnnotatedPositions(const std::map<size_t, QColor> &positions) {
+        std::fill(annotation_colors_.begin(), annotation_colors_.end(), 0U);
+        for (const auto &[index, color] : positions) {
+            if (index < annotation_colors_.size()) {
+                annotation_colors_[index] = color.isValid() ? color.rgba() : kDefaultAnnotationColor.rgba();
             }
         }
         update();
@@ -1001,11 +1039,12 @@ protected:
                 const double cell_x = hex_start_x_ + static_cast<double>(col * 3) * hex_cell_width_;
                 const double ascii_x = ascii_start_x_ + static_cast<double>(col) * ascii_cell_width_;
                 const bool selected = selection_mask_[index] != 0;
-                const bool annotated = annotation_mask_[index] != 0;
+                const bool annotated = annotation_colors_[index] != 0U;
                 const bool matched = match_mask_[index] != 0;
                 const double age = changed_at_[index] < 0.0 ? kFadeSeconds : (now - changed_at_[index]);
                 const double fade = std::clamp(1.0 - (age / kFadeSeconds), 0.0, 1.0);
                 const uint8_t value = byteForIndex(index);
+                const QColor annotation_color = annotated ? QColor::fromRgba(annotation_colors_[index]) : kDefaultAnnotationColor;
 
                 if (fade > 0.0 || selected || matched) {
                     double r = 0.14;
@@ -1043,8 +1082,8 @@ protected:
                 QColor hex_color(0xEE, 0xEE, 0xEF);
                 QColor ascii_color(0xCD, 0xDB, 0xE2);
                 if (annotated) {
-                    hex_color = QColor(0x72, 0xE6, 0x7A);
-                    ascii_color = QColor(0x72, 0xE6, 0x7A);
+                    hex_color = annotation_color;
+                    ascii_color = annotation_color;
                 }
                 if (matched) {
                     hex_color = QColor(0xFF, 0xF4, 0xB0);
@@ -1268,7 +1307,7 @@ private:
     std::vector<uint8_t> last_seen_;
     std::vector<double> changed_at_;
     std::vector<uint8_t> match_mask_;
-    std::vector<uint8_t> annotation_mask_;
+    std::vector<QRgb> annotation_colors_;
     std::vector<uint8_t> selection_mask_;
     std::vector<size_t> matches_;
     std::vector<uint8_t> visible_cache_;
@@ -1538,6 +1577,10 @@ public:
         annotation_editor_->setEnabled(false);
         annotation_layout->addWidget(annotation_editor_);
 
+        annotation_color_button_ = new QPushButton("Highlight color");
+        annotation_color_button_->setEnabled(false);
+        annotation_layout->addWidget(annotation_color_button_);
+
         clear_annotation_button_ = new QPushButton("Clear selected annotations");
         clear_annotation_button_->setEnabled(false);
         annotation_layout->addWidget(clear_annotation_button_);
@@ -1582,6 +1625,9 @@ public:
 
         connect(annotation_editor_, &QTextEdit::textChanged, this, [this]() {
             onAnnotationEdited();
+        });
+        connect(annotation_color_button_, &QPushButton::clicked, this, [this]() {
+            chooseAnnotationColor();
         });
         connect(clear_annotation_button_, &QPushButton::clicked, this, [this]() {
             clearSelectedAnnotations();
@@ -1750,12 +1796,15 @@ private:
 
         const bool can_edit = !current_selection_.empty();
         annotation_editor_->setEnabled(can_edit);
+        annotation_color_button_->setEnabled(can_edit);
         clear_annotation_button_->setEnabled(can_edit && annotation_store_.hasFilePath());
 
         active_annotation_ = annotation_store_.resolveForSelection(current_selection_);
         const QString note = QString::fromStdString(active_annotation_.note);
         const QSignalBlocker blocker(annotation_editor_);
         annotation_editor_->setPlainText(note);
+        current_annotation_color_ = active_annotation_.isValid() ? active_annotation_.color : kDefaultAnnotationColor;
+        updateAnnotationColorButton();
     }
 
     void onAnnotationEdited() {
@@ -1770,13 +1819,31 @@ private:
 
         const std::vector<size_t> target_positions = active_annotation_.isValid() ? active_annotation_.positions : current_selection_;
         QString error_message;
-        if (!annotation_store_.setAnnotation(target_positions, annotation_editor_->toPlainText().toStdString(), &error_message)) {
+        if (!annotation_store_.setAnnotation(target_positions, annotation_editor_->toPlainText().toStdString(), current_annotation_color_, &error_message)) {
             QMessageBox::warning(this, QStringLiteral("Annotations"), error_message);
             return;
         }
         active_annotation_ = annotation_store_.resolveForSelection(current_selection_);
         refreshAnnotationHighlights();
         updateStatus();
+    }
+
+    void chooseAnnotationColor() {
+        if (current_selection_.empty()) {
+            return;
+        }
+
+        const QColor chosen = QColorDialog::getColor(current_annotation_color_, this, QStringLiteral("Choose Note Highlight Color"));
+        if (!chosen.isValid()) {
+            return;
+        }
+
+        current_annotation_color_ = chosen;
+        updateAnnotationColorButton();
+
+        if (annotation_store_.hasFilePath()) {
+            onAnnotationEdited();
+        }
     }
 
     void clearSelectedAnnotations() {
@@ -1796,7 +1863,7 @@ private:
     }
 
     void refreshAnnotationHighlights() {
-        const std::set<size_t> annotated_positions = annotation_store_.annotatedPositions();
+        const std::map<size_t, QColor> annotated_positions = annotation_store_.annotatedPositions();
         if (viewer_widget_) {
             viewer_widget_->setAnnotatedPositions(annotated_positions);
         }
@@ -1818,6 +1885,12 @@ private:
         if (QClipboard *clipboard = QApplication::clipboard()) {
             clipboard->setText(QString::fromStdString(text));
         }
+    }
+
+    void updateAnnotationColorButton() {
+        const QColor color = current_annotation_color_.isValid() ? current_annotation_color_ : kDefaultAnnotationColor;
+        annotation_color_button_->setText(QStringLiteral("Highlight: %1").arg(color.name(QColor::HexRgb)));
+        annotation_color_button_->setStyleSheet(annotation_color_button_style(color));
     }
 
     void updateStatus(size_t index = std::numeric_limits<size_t>::max(), uint8_t value = 0) {
@@ -1880,10 +1953,12 @@ private:
     QLabel *annotation_selection_label_;
     QLabel *annotation_file_label_;
     QTextEdit *annotation_editor_;
+    QPushButton *annotation_color_button_;
     QPushButton *clear_annotation_button_;
     QLabel *status_label_;
     AnnotationStore annotation_store_;
     AnnotationStore::ResolvedAnnotation active_annotation_;
+    QColor current_annotation_color_ = kDefaultAnnotationColor;
     std::vector<size_t> current_selection_;
     std::string last_search_signature_;
 };
