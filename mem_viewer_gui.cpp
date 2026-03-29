@@ -1612,6 +1612,7 @@ public:
         });
 
         connect(notes_file_tabs_, &QTabWidget::currentChanged, this, [this](int) {
+            refreshAnnotationHighlights();
             updateAnnotationUi();
             updateStatus();
         });
@@ -1913,9 +1914,8 @@ private:
 
     void refreshAnnotationHighlights() {
         std::map<size_t, QColor> annotated_positions;
-        for (const auto &note_tab : note_tabs_) {
-            const std::map<size_t, QColor> store_positions = note_tab->store.annotatedPositions();
-            annotated_positions.insert(store_positions.begin(), store_positions.end());
+        if (NoteTabState *state = currentNoteTabState()) {
+            annotated_positions = state->store.annotatedPositions();
         }
         if (viewer_widget_) {
             viewer_widget_->setAnnotatedPositions(annotated_positions);
