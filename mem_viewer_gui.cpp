@@ -22,6 +22,7 @@
 #include <QFont>
 #include <QFontMetrics>
 #include <QFileDialog>
+#include <QFileInfo>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -1371,6 +1372,18 @@ private:
 
 class MemViewerWindow : public QMainWindow {
 public:
+    struct NoteTabState {
+        QWidget *page = nullptr;
+        QLabel *selection_label = nullptr;
+        QLabel *file_label = nullptr;
+        QTextEdit *editor = nullptr;
+        QPushButton *color_button = nullptr;
+        QPushButton *clear_button = nullptr;
+        AnnotationStore store;
+        AnnotationStore::ResolvedAnnotation active_annotation;
+        QColor current_color = kDefaultAnnotationColor;
+    };
+
     MemViewerWindow(
         size_t memory_size,
         std::function<bool(size_t, void *, size_t)> read_memory,
@@ -1558,33 +1571,8 @@ public:
         notes_layout->setContentsMargins(0, 0, 0, 0);
         notes_layout->setSpacing(8);
 
-        QFrame *annotation_frame = new QFrame();
-        annotation_frame->setFrameStyle(QFrame::Box | QFrame::Raised);
-        QVBoxLayout *annotation_layout = new QVBoxLayout(annotation_frame);
-        annotation_layout->setContentsMargins(8, 8, 8, 8);
-        annotation_layout->setSpacing(6);
-
-        annotation_selection_label_ = new QLabel("No bytes selected");
-        annotation_selection_label_->setWordWrap(true);
-        annotation_layout->addWidget(annotation_selection_label_);
-
-        annotation_file_label_ = new QLabel("Annotation file: not selected");
-        annotation_file_label_->setWordWrap(true);
-        annotation_layout->addWidget(annotation_file_label_);
-
-        annotation_editor_ = new QTextEdit();
-        annotation_editor_->setPlaceholderText("Select one or more bytes and type notes here");
-        annotation_editor_->setEnabled(false);
-        annotation_layout->addWidget(annotation_editor_);
-
-        annotation_color_button_ = new QPushButton("Highlight color");
-        annotation_color_button_->setEnabled(false);
-        annotation_layout->addWidget(annotation_color_button_);
-
-        clear_annotation_button_ = new QPushButton("Clear selected annotations");
-        clear_annotation_button_->setEnabled(false);
-        annotation_layout->addWidget(clear_annotation_button_);
-        notes_layout->addWidget(annotation_frame);
+        notes_file_tabs_ = new QTabWidget();
+        notes_layout->addWidget(notes_file_tabs_);
         notes_layout->addStretch();
         side_tabs->addTab(notes_tab, "Notes");
 
@@ -1623,14 +1611,9 @@ public:
             }
         });
 
-        connect(annotation_editor_, &QTextEdit::textChanged, this, [this]() {
-            onAnnotationEdited();
-        });
-        connect(annotation_color_button_, &QPushButton::clicked, this, [this]() {
-            chooseAnnotationColor();
-        });
-        connect(clear_annotation_button_, &QPushButton::clicked, this, [this]() {
-            clearSelectedAnnotations();
+        connect(notes_file_tabs_, &QTabWidget::currentChanged, this, [this](int) {
+            updateAnnotationUi();
+            updateStatus();
         });
 
         refreshAnnotationHighlights();
@@ -1653,8 +1636,10 @@ private:
             dialog.setFileMode(QFileDialog::ExistingFile);
             dialog.setNameFilter(QStringLiteral("JSON Files (*.json);;All Files (*)"));
             dialog.setOption(QFileDialog::DontUseNativeDialog, true);
-            if (annotation_store_.hasFilePath()) {
-                dialog.selectFile(annotation_store_.filePath());
+            if (NoteTabState *state = currentNoteTabState()) {
+                if (state->store.hasFilePath()) {
+                    dialog.selectFile(state->store.filePath());
+                }
             }
 
             if (dialog.exec() != QDialog::Accepted) {
@@ -1676,8 +1661,10 @@ private:
             dialog.setFileMode(QFileDialog::AnyFile);
             dialog.setNameFilter(QStringLiteral("JSON Files (*.json);;All Files (*)"));
             dialog.setOption(QFileDialog::DontUseNativeDialog, true);
-            if (annotation_store_.hasFilePath()) {
-                dialog.selectFile(annotation_store_.filePath());
+            if (NoteTabState *state = currentNoteTabState()) {
+                if (state->store.hasFilePath()) {
+                    dialog.selectFile(state->store.filePath());
+                }
             }
 
             if (dialog.exec() != QDialog::Accepted) {
@@ -1701,11 +1688,75 @@ private:
     }
 
     void selectAnnotationFile(const QString &path) {
+        if (path.isEmpty()) {
+            return;
+        }
+
+        if (int existing_index = findNoteTabByPath(path); existing_index >= 0) {
+            notes_file_tabs_->setCurrentIndex(existing_index);
+            updateAnnotationUi();
+            updateStatus();
+            return;
+        }
+
+        auto note_tab = std::make_unique<NoteTabState>();
+        note_tab->page = new QWidget();
+        QVBoxLayout *page_layout = new QVBoxLayout(note_tab->page);
+        page_layout->setContentsMargins(0, 0, 0, 0);
+        page_layout->setSpacing(0);
+
+        QFrame *annotation_frame = new QFrame();
+        annotation_frame->setFrameStyle(QFrame::Box | QFrame::Raised);
+        QVBoxLayout *annotation_layout = new QVBoxLayout(annotation_frame);
+        annotation_layout->setContentsMargins(8, 8, 8, 8);
+        annotation_layout->setSpacing(6);
+
+        note_tab->selection_label = new QLabel("No bytes selected");
+        note_tab->selection_label->setWordWrap(true);
+        annotation_layout->addWidget(note_tab->selection_label);
+
+        note_tab->file_label = new QLabel();
+        note_tab->file_label->setWordWrap(true);
+        annotation_layout->addWidget(note_tab->file_label);
+
+        note_tab->editor = new QTextEdit();
+        note_tab->editor->setPlaceholderText("Select one or more bytes and type notes here");
+        note_tab->editor->setEnabled(false);
+        annotation_layout->addWidget(note_tab->editor);
+
+        note_tab->color_button = new QPushButton("Highlight color");
+        note_tab->color_button->setEnabled(false);
+        annotation_layout->addWidget(note_tab->color_button);
+
+        note_tab->clear_button = new QPushButton("Clear selected annotations");
+        note_tab->clear_button->setEnabled(false);
+        annotation_layout->addWidget(note_tab->clear_button);
+
+        page_layout->addWidget(annotation_frame);
+
         QString error_message;
-        if (!annotation_store_.selectFile(path, &error_message)) {
+        if (!note_tab->store.selectFile(path, &error_message)) {
+            delete note_tab->page;
             QMessageBox::warning(this, QStringLiteral("Annotations"), error_message);
             return;
         }
+
+        note_tab->current_color = kDefaultAnnotationColor;
+
+        connect(note_tab->editor, &QTextEdit::textChanged, this, [this, raw = note_tab.get()]() {
+            onAnnotationEdited(raw);
+        });
+        connect(note_tab->color_button, &QPushButton::clicked, this, [this, raw = note_tab.get()]() {
+            chooseAnnotationColor(raw);
+        });
+        connect(note_tab->clear_button, &QPushButton::clicked, this, [this, raw = note_tab.get()]() {
+            clearSelectedAnnotations(raw);
+        });
+
+        const QString tab_name = QFileInfo(path).fileName().isEmpty() ? path : QFileInfo(path).fileName();
+        const int new_index = notes_file_tabs_->addTab(note_tab->page, tab_name);
+        note_tabs_.push_back(std::move(note_tab));
+        notes_file_tabs_->setCurrentIndex(new_index);
 
         refreshAnnotationHighlights();
         updateAnnotationUi();
@@ -1786,84 +1837,86 @@ private:
     }
 
     void updateAnnotationUi() {
-        annotation_selection_label_->setText(selection_summary_text(current_selection_));
-
-        if (annotation_store_.hasFilePath()) {
-            annotation_file_label_->setText(QStringLiteral("Annotation file: %1").arg(annotation_store_.filePath()));
-        } else {
-            annotation_file_label_->setText(QStringLiteral("Annotation file: not selected"));
+        if (notes_file_tabs_ == nullptr) {
+            return;
         }
 
-        const bool can_edit = !current_selection_.empty();
-        annotation_editor_->setEnabled(can_edit);
-        annotation_color_button_->setEnabled(can_edit);
-        clear_annotation_button_->setEnabled(can_edit && annotation_store_.hasFilePath());
-
-        active_annotation_ = annotation_store_.resolveForSelection(current_selection_);
-        const QString note = QString::fromStdString(active_annotation_.note);
-        const QSignalBlocker blocker(annotation_editor_);
-        annotation_editor_->setPlainText(note);
-        current_annotation_color_ = active_annotation_.isValid() ? active_annotation_.color : kDefaultAnnotationColor;
-        updateAnnotationColorButton();
+        for (const auto &note_tab : note_tabs_) {
+            updateAnnotationUiForTab(*note_tab);
+        }
     }
 
-    void onAnnotationEdited() {
+    void onAnnotationEdited(NoteTabState *state) {
+        if (state == nullptr) {
+            return;
+        }
+
         if (current_selection_.empty()) {
             return;
         }
 
-        if (!annotation_store_.hasFilePath()) {
+        if (!state->store.hasFilePath()) {
             updateStatus();
             return;
         }
 
-        const std::vector<size_t> target_positions = active_annotation_.isValid() ? active_annotation_.positions : current_selection_;
+        const std::vector<size_t> target_positions = state->active_annotation.isValid() ? state->active_annotation.positions : current_selection_;
         QString error_message;
-        if (!annotation_store_.setAnnotation(target_positions, annotation_editor_->toPlainText().toStdString(), current_annotation_color_, &error_message)) {
+        if (!state->store.setAnnotation(target_positions, state->editor->toPlainText().toStdString(), state->current_color, &error_message)) {
             QMessageBox::warning(this, QStringLiteral("Annotations"), error_message);
             return;
         }
-        active_annotation_ = annotation_store_.resolveForSelection(current_selection_);
+        state->active_annotation = state->store.resolveForSelection(current_selection_);
         refreshAnnotationHighlights();
+        updateAnnotationUiForTab(*state);
         updateStatus();
     }
 
-    void chooseAnnotationColor() {
+    void chooseAnnotationColor(NoteTabState *state) {
+        if (state == nullptr) {
+            return;
+        }
+
         if (current_selection_.empty()) {
             return;
         }
 
-        const QColor chosen = QColorDialog::getColor(current_annotation_color_, this, QStringLiteral("Choose Note Highlight Color"));
+        const QColor chosen = QColorDialog::getColor(state->current_color, this, QStringLiteral("Choose Note Highlight Color"));
         if (!chosen.isValid()) {
             return;
         }
 
-        current_annotation_color_ = chosen;
-        updateAnnotationColorButton();
+        state->current_color = chosen;
+        updateAnnotationColorButton(*state);
 
-        if (annotation_store_.hasFilePath()) {
-            onAnnotationEdited();
+        if (state->store.hasFilePath()) {
+            onAnnotationEdited(state);
         }
     }
 
-    void clearSelectedAnnotations() {
-        if (current_selection_.empty() || !annotation_store_.hasFilePath()) {
+    void clearSelectedAnnotations(NoteTabState *state) {
+        if (state == nullptr || current_selection_.empty() || !state->store.hasFilePath()) {
             return;
         }
 
         QString error_message;
-        if (!annotation_store_.clearAnnotationPositions(current_selection_, &error_message)) {
+        if (!state->store.clearAnnotationPositions(current_selection_, &error_message)) {
             QMessageBox::warning(this, QStringLiteral("Annotations"), error_message);
             return;
         }
 
         refreshAnnotationHighlights();
+        updateAnnotationUiForTab(*state);
         updateAnnotationUi();
         updateStatus();
     }
 
     void refreshAnnotationHighlights() {
-        const std::map<size_t, QColor> annotated_positions = annotation_store_.annotatedPositions();
+        std::map<size_t, QColor> annotated_positions;
+        for (const auto &note_tab : note_tabs_) {
+            const std::map<size_t, QColor> store_positions = note_tab->store.annotatedPositions();
+            annotated_positions.insert(store_positions.begin(), store_positions.end());
+        }
         if (viewer_widget_) {
             viewer_widget_->setAnnotatedPositions(annotated_positions);
         }
@@ -1887,10 +1940,50 @@ private:
         }
     }
 
-    void updateAnnotationColorButton() {
-        const QColor color = current_annotation_color_.isValid() ? current_annotation_color_ : kDefaultAnnotationColor;
-        annotation_color_button_->setText(QStringLiteral("Highlight: %1").arg(color.name(QColor::HexRgb)));
-        annotation_color_button_->setStyleSheet(annotation_color_button_style(color));
+    void updateAnnotationColorButton(NoteTabState &state) {
+        const QColor color = state.current_color.isValid() ? state.current_color : kDefaultAnnotationColor;
+        state.color_button->setText(QStringLiteral("Highlight: %1").arg(color.name(QColor::HexRgb)));
+        state.color_button->setStyleSheet(annotation_color_button_style(color));
+    }
+
+    void updateAnnotationUiForTab(NoteTabState &state) {
+        state.selection_label->setText(selection_summary_text(current_selection_));
+        state.file_label->setText(
+            state.store.hasFilePath()
+                ? QStringLiteral("Annotation file: %1").arg(state.store.filePath())
+                : QStringLiteral("Annotation file: not selected"));
+
+        const bool can_edit = !current_selection_.empty();
+        state.editor->setEnabled(can_edit);
+        state.color_button->setEnabled(can_edit);
+        state.clear_button->setEnabled(can_edit && state.store.hasFilePath());
+
+        state.active_annotation = state.store.resolveForSelection(current_selection_);
+        const QString note = QString::fromStdString(state.active_annotation.note);
+        const QSignalBlocker blocker(state.editor);
+        state.editor->setPlainText(note);
+        state.current_color = state.active_annotation.isValid() ? state.active_annotation.color : kDefaultAnnotationColor;
+        updateAnnotationColorButton(state);
+    }
+
+    int findNoteTabByPath(const QString &path) const {
+        for (size_t i = 0; i < note_tabs_.size(); ++i) {
+            if (note_tabs_[i]->store.filePath() == path) {
+                return static_cast<int>(i);
+            }
+        }
+        return -1;
+    }
+
+    NoteTabState *currentNoteTabState() const {
+        if (notes_file_tabs_ == nullptr) {
+            return nullptr;
+        }
+        const int index = notes_file_tabs_->currentIndex();
+        if (index < 0 || index >= static_cast<int>(note_tabs_.size())) {
+            return nullptr;
+        }
+        return note_tabs_[static_cast<size_t>(index)].get();
     }
 
     void updateStatus(size_t index = std::numeric_limits<size_t>::max(), uint8_t value = 0) {
@@ -1913,10 +2006,10 @@ private:
             if (!current_selection_.empty()) {
                 ss << " | Selected: " << current_selection_.size();
             }
-            if (annotation_store_.hasFilePath()) {
+            if (!note_tabs_.empty()) {
                 ss << " | Notes: autosaved";
             } else if (!current_selection_.empty()) {
-                ss << " | Pick annotation file in File menu";
+                ss << " | Load a notes file in File menu";
             }
             status_label_->setText(QString::fromStdString(ss.str()));
             return;
@@ -1950,15 +2043,9 @@ private:
     QPushButton *next_button_;
     QLineEdit *edit_entry_;
     QPushButton *apply_button_;
-    QLabel *annotation_selection_label_;
-    QLabel *annotation_file_label_;
-    QTextEdit *annotation_editor_;
-    QPushButton *annotation_color_button_;
-    QPushButton *clear_annotation_button_;
+    QTabWidget *notes_file_tabs_;
     QLabel *status_label_;
-    AnnotationStore annotation_store_;
-    AnnotationStore::ResolvedAnnotation active_annotation_;
-    QColor current_annotation_color_ = kDefaultAnnotationColor;
+    std::vector<std::unique_ptr<NoteTabState>> note_tabs_;
     std::vector<size_t> current_selection_;
     std::string last_search_signature_;
 };
