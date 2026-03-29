@@ -5,6 +5,7 @@ test_sdl
 test_file
 mem_viewer_helper
 test_shared
+binary_compare
 *~
 *.swp
 *.tmp
