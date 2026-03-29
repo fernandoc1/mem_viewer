@@ -204,3 +204,7 @@ void ComparisonWindow::closeEvent(QCloseEvent *event) {
     }
     QMainWindow::closeEvent(event);
 }
+
+void ComparisonWindow::loadFilesFromPaths(const QString &file1, const QString &file2) {
+    loadComparison(file1, file2);
+}

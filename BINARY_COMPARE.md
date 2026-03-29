@@ -24,7 +24,7 @@ The executable will be placed at `./binary_compare`
 
 ## Usage
 
-### GUI Mode
+### GUI Mode Without Files
 
 ```bash
 ./binary_compare
@@ -34,6 +34,36 @@ Then:
 1. Click **File → Open Files...** to select two binary files
 2. Files will be displayed side-by-side with differences highlighted in orange
 3. Use navigation buttons or keyboard shortcuts to jump between differences
+
+### Command-Line Mode (Auto-load Files)
+
+```bash
+./binary_compare file1.bin file2.bin
+```
+
+When two files are provided as command-line arguments:
+1. Files are automatically loaded on startup
+2. Comparison is displayed immediately
+3. Ready to navigate differences right away
+
+### Examples
+
+```bash
+# Compare ROM files
+./binary_compare original.rom modified.rom
+
+# Compare object files
+./binary_compare main.o main_debug.o
+
+# Compare firmware versions
+./binary_compare firmware_v1.0.bin firmware_v1.1.bin
+
+# Compare with relative paths
+./binary_compare ../backup/file.bin ./current/file.bin
+
+# Compare with absolute paths
+./binary_compare /mnt/backup/data.bin /home/user/data.bin
+```
 
 ### Keyboard Shortcuts
 

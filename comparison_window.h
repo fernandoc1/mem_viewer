@@ -14,6 +14,9 @@ class ComparisonWindow : public QMainWindow {
 public:
     ComparisonWindow(QWidget *parent = nullptr);
     ~ComparisonWindow() override;
+    
+    // Load files directly (used for command-line arguments)
+    void loadFilesFromPaths(const QString &file1, const QString &file2);
 
 protected:
     void closeEvent(QCloseEvent *event) override;
