@@ -155,9 +155,11 @@ Or auto-load two files:
 
 Annotations are stored as JSON. Each annotation entry contains:
 
-- `positions`: array of byte offsets
+- `positions`: array of byte offsets, either as decimal JSON numbers or strings such as `"0x10"`
 - `note`: free-form text
 - `color`: highlight color as a hex string such as `#72e67a`
+
+When saving, `mem_viewer` writes positions as hex strings.
 
 Example:
 
@@ -165,7 +167,7 @@ Example:
 {
   "annotations": [
     {
-      "positions": [16, 17, 18],
+      "positions": ["0x10", "0x11", "0x12"],
       "note": "Header bytes",
       "color": "#72e67a"
     }

@@ -284,6 +284,43 @@ static QColor annotation_color_from_json(const QJsonValue &value) {
     return color.isValid() ? color : kDefaultAnnotationColor;
 }
 
+static bool annotation_position_from_json(const QJsonValue &value, size_t *position) {
+    if (!position) {
+        return false;
+    }
+
+    if (value.isDouble()) {
+        const qint64 raw_value = static_cast<qint64>(value.toDouble());
+        if (raw_value < 0) {
+            return false;
+        }
+        *position = static_cast<size_t>(raw_value);
+        return true;
+    }
+
+    if (value.isString()) {
+        const QString text = value.toString().trimmed();
+        bool ok = false;
+        qulonglong parsed = 0;
+        if (text.startsWith(QStringLiteral("0x"), Qt::CaseInsensitive)) {
+            parsed = text.mid(2).toULongLong(&ok, 16);
+        } else {
+            parsed = text.toULongLong(&ok, 10);
+        }
+        if (!ok) {
+            return false;
+        }
+        *position = static_cast<size_t>(parsed);
+        return true;
+    }
+
+    return false;
+}
+
+static QString annotation_position_to_json(size_t position) {
+    return QStringLiteral("0x%1").arg(static_cast<qulonglong>(position), 0, 16);
+}
+
 static QString annotation_color_to_json(const QColor &color) {
     const QColor safe_color = color.isValid() ? color : kDefaultAnnotationColor;
     return safe_color.name(QColor::HexRgb);
@@ -367,14 +404,11 @@ public:
             const QJsonArray positions_array = entry_object.value(QStringLiteral("positions")).toArray();
             std::set<size_t> unique_positions;
             for (const QJsonValue &position_value : positions_array) {
-                if (!position_value.isDouble()) {
+                size_t position = 0;
+                if (!annotation_position_from_json(position_value, &position)) {
                     continue;
                 }
-                const qint64 raw_value = static_cast<qint64>(position_value.toDouble());
-                if (raw_value < 0) {
-                    continue;
-                }
-                unique_positions.insert(static_cast<size_t>(raw_value));
+                unique_positions.insert(position);
             }
             if (unique_positions.empty()) {
                 continue;
@@ -520,7 +554,7 @@ private:
             QJsonObject object;
             QJsonArray positions;
             for (size_t position : entry.positions) {
-                positions.append(static_cast<qint64>(position));
+                positions.append(annotation_position_to_json(position));
             }
             object.insert(QStringLiteral("positions"), positions);
             object.insert(QStringLiteral("note"), QString::fromStdString(entry.note));
