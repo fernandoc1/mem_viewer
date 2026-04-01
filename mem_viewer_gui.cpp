@@ -85,6 +85,14 @@ static void mem_viewer_debug_log(const char *fmt, ...) {
     std::fflush(stderr);
 }
 
+static bool mem_viewer_auto_refresh_forced_off() {
+    static const bool disabled = []() {
+        const char *value = std::getenv("MEM_VIEWER_DISABLE_AUTO_REFRESH");
+        return value != nullptr && value[0] != '\0' && std::strcmp(value, "0") != 0;
+    }();
+    return disabled;
+}
+
 constexpr size_t kBytesPerRow = 16;
 constexpr int kRefreshMs = 100;
 constexpr double kFadeSeconds = 1.6;
@@ -1475,7 +1483,11 @@ public:
         inspect_layout->setSpacing(8);
 
         auto_refresh_ = new QCheckBox("Auto refresh");
-        auto_refresh_->setChecked(true);
+        auto_refresh_->setChecked(!mem_viewer_auto_refresh_forced_off());
+        if (mem_viewer_auto_refresh_forced_off()) {
+            auto_refresh_->setEnabled(false);
+            auto_refresh_->setToolTip(QStringLiteral("Auto refresh is disabled for this viewer mode."));
+        }
 
         refresh_button_ = new QPushButton("Refresh");
         connect(refresh_button_, &QPushButton::clicked, this, [this]() {
@@ -1656,6 +1668,9 @@ public:
                 viewer_widget_->setAutoRefresh(checked);
             }
         });
+        if (viewer_widget_ && mem_viewer_auto_refresh_forced_off()) {
+            viewer_widget_->setAutoRefresh(false);
+        }
 
         connect(notes_file_tabs_, &QTabWidget::currentChanged, this, [this](int) {
             refreshAnnotationHighlights();
