@@ -1218,16 +1218,20 @@ public:
     std::function<void()> onSearchStatusUpdated;
 
 protected:
-    void paintEvent(QPaintEvent *) override {
+    void paintEvent(QPaintEvent *event) override {
         const double start = mem_viewer_now_seconds();
         QPainter painter(this);
         painter.setRenderHint(QPainter::Antialiasing);
         
         QScrollBar *vscroll = verticalScrollBar();
         const int scroll_y = vscroll ? vscroll->value() : 0;
-        const int visible_height = height();
-        const size_t first_row = static_cast<size_t>(std::max(0, static_cast<int>(std::floor(scroll_y / row_height_))));
-        const size_t visible_rows = static_cast<size_t>(std::ceil(visible_height / row_height_)) + 2;
+        QWidget *view = viewport();
+        const int visible_height = view ? view->height() : height();
+        const QRect dirty_rect = event != nullptr ? event->rect() : rect();
+        const int dirty_top = std::max(scroll_y, dirty_rect.top());
+        const int dirty_bottom = std::min(scroll_y + visible_height, dirty_rect.bottom() + 1);
+        const size_t first_row = static_cast<size_t>(std::max(0, static_cast<int>(std::floor(dirty_top / row_height_))));
+        const size_t visible_rows = static_cast<size_t>(std::ceil(std::max(0, dirty_bottom - dirty_top) / row_height_)) + 2;
         const size_t last_row = std::min(rows_, first_row + visible_rows);
         const double now = mem_viewer_now_seconds();
 
