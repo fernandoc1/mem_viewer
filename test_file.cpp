@@ -2,16 +2,16 @@
 
 #include <cstdio>
 #include <chrono>
+#include <cstdlib>
+#include <cstring>
 #include <fstream>
 #include <iostream>
-#include <iterator>
 #include <string>
 #include <thread>
-#include <vector>
 
 int main(int argc, char **argv) {
     if (argc < 2) {
-        std::cerr << "usage: " << argv[0] << " <file>\n";
+        std::cerr << "usage: " << argv[0] << " <file> [notes.json ...]\n";
         return 1;
     }
 
@@ -21,14 +21,48 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    std::vector<unsigned char> buffer((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
-    if (buffer.empty()) {
-        buffer.push_back(0);
+    input.seekg(0, std::ios::end);
+    const std::streamoff file_size = input.tellg();
+    if (file_size < 0) {
+        std::cerr << "failed to determine file size: " << argv[1] << "\n";
+        return 1;
+    }
+    input.seekg(0, std::ios::beg);
+
+    const size_t buffer_size = file_size == 0 ? 1 : static_cast<size_t>(file_size);
+    auto *buffer = static_cast<unsigned char *>(mem_viewer_shared_malloc(buffer_size));
+    if (!buffer) {
+        std::cerr << "mem_viewer_shared_malloc failed\n";
+        return 1;
     }
 
-    MemViewer *viewer = mem_viewer_open(buffer.data(), buffer.size());
+    if (file_size == 0) {
+        buffer[0] = 0;
+    } else if (!input.read(reinterpret_cast<char *>(buffer), file_size)) {
+        std::cerr << "failed to read file: " << argv[1] << "\n";
+        mem_viewer_shared_free(buffer, buffer_size);
+        return 1;
+    }
+
+    if (argc > 2) {
+        std::string notes_value;
+        for (int i = 2; i < argc; ++i) {
+            if (!notes_value.empty()) {
+                notes_value += ":";
+            }
+            notes_value += argv[i];
+        }
+        if (setenv("MEM_VIEWER_NOTES", notes_value.c_str(), 1) != 0) {
+            std::cerr << "failed to set MEM_VIEWER_NOTES\n";
+            mem_viewer_shared_free(buffer, buffer_size);
+            return 1;
+        }
+    }
+
+    MemViewer *viewer = mem_viewer_open_shared(buffer, buffer_size);
     if (!viewer) {
-        std::cerr << "mem_viewer_open failed\n";
+        std::cerr << "mem_viewer_open_shared failed\n";
+        mem_viewer_shared_free(buffer, buffer_size);
         return 1;
     }
 
@@ -37,5 +71,6 @@ int main(int argc, char **argv) {
     }
 
     mem_viewer_destroy(viewer);
+    mem_viewer_shared_free(buffer, buffer_size);
     return 0;
 }

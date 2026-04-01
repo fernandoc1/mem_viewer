@@ -139,6 +139,14 @@ Run the shared-memory demo:
 ./test_shared
 ```
 
+Open a static file in the viewer:
+
+```bash
+./test_file path/to/file.bin [notes1.json notes2.json ...]
+```
+
+`test_file` loads the file into shared memory and opens the viewer in shared-memory mode, which avoids the live-process refresh overhead and is faster for large static files. Any additional arguments are passed as note files through `MEM_VIEWER_NOTES`.
+
 Open the binary comparator:
 
 ```bash
