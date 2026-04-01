@@ -1835,6 +1835,11 @@ public:
 
         viewer_widget_ = new MemViewerWidget(memory_size, read_memory, write_memory, open_flag, scroll_area_);
         scroll_area_->setWidget(viewer_widget_);
+        connect(note_scroll_bar_, &QScrollBar::valueChanged, this, [this](int) {
+            if (viewer_widget_) {
+                viewer_widget_->refreshVisibleBytes();
+            }
+        });
 
         viewer_widget_->onSelectionChanged = [this](const std::vector<size_t> &selection) {
             onSelectionChanged(selection);
