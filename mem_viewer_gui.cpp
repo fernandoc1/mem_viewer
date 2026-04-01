@@ -56,6 +56,7 @@
 #include <optional>
 #include <sstream>
 #include <string>
+#include <utility>
 #include <vector>
 #include <sys/prctl.h>
 #include <sys/uio.h>
@@ -109,6 +110,11 @@ struct AnnotationEntry {
     std::vector<size_t> positions;
     std::string note;
     QColor color = kDefaultAnnotationColor;
+};
+
+struct AnnotationColorPoint {
+    size_t position = 0;
+    QRgb color = 0U;
 };
 
 enum class SearchFormat {
@@ -404,30 +410,36 @@ public:
         }
 
         const QJsonArray annotations = document.object().value(QStringLiteral("annotations")).toArray();
+        annotations_.reserve(static_cast<size_t>(annotations.size()));
         for (const QJsonValue &entry_value : annotations) {
             if (!entry_value.isObject()) {
                 continue;
             }
             const QJsonObject entry_object = entry_value.toObject();
             const QJsonArray positions_array = entry_object.value(QStringLiteral("positions")).toArray();
-            std::set<size_t> unique_positions;
+            std::vector<size_t> unique_positions;
+            unique_positions.reserve(static_cast<size_t>(positions_array.size()));
             for (const QJsonValue &position_value : positions_array) {
                 size_t position = 0;
                 if (!annotation_position_from_json(position_value, &position)) {
                     continue;
                 }
-                unique_positions.insert(position);
+                unique_positions.push_back(position);
             }
             if (unique_positions.empty()) {
                 continue;
             }
+            std::sort(unique_positions.begin(), unique_positions.end());
+            unique_positions.erase(std::unique(unique_positions.begin(), unique_positions.end()), unique_positions.end());
 
             AnnotationEntry entry;
-            entry.positions.assign(unique_positions.begin(), unique_positions.end());
+            entry.positions = std::move(unique_positions);
             entry.note = entry_object.value(QStringLiteral("note")).toString().toStdString();
             entry.color = annotation_color_from_json(entry_object.value(QStringLiteral("color")));
             annotations_.push_back(std::move(entry));
         }
+
+        annotation_points_dirty_ = true;
 
         return true;
     }
@@ -474,6 +486,7 @@ public:
             entry.color = color.isValid() ? color : kDefaultAnnotationColor;
             annotations_.push_back(std::move(entry));
         }
+        annotation_points_dirty_ = true;
         return save(error_message);
     }
 
@@ -483,23 +496,21 @@ public:
         }
 
         removePositionsFromAnnotations(normalizePositions(positions));
+        annotation_points_dirty_ = true;
         return save(error_message);
     }
 
-    std::map<size_t, QColor> annotatedPositions() const {
-        std::map<size_t, QColor> positions;
-        for (const AnnotationEntry &entry : annotations_) {
-            for (size_t position : entry.positions) {
-                positions[position] = entry.color;
-            }
-        }
-        return positions;
+    const std::vector<AnnotationColorPoint> &annotatedPositions() const {
+        rebuildAnnotationPointsIfNeeded();
+        return annotation_points_;
     }
 
 private:
     static std::vector<size_t> normalizePositions(const std::vector<size_t> &positions) {
-        std::set<size_t> unique_positions(positions.begin(), positions.end());
-        return std::vector<size_t>(unique_positions.begin(), unique_positions.end());
+        std::vector<size_t> unique_positions = positions;
+        std::sort(unique_positions.begin(), unique_positions.end());
+        unique_positions.erase(std::unique(unique_positions.begin(), unique_positions.end()), unique_positions.end());
+        return unique_positions;
     }
 
     static bool containsAllPositions(const std::vector<size_t> &haystack, const std::vector<size_t> &needle) {
@@ -550,6 +561,46 @@ private:
         }
 
         annotations_ = std::move(updated_annotations);
+        annotation_points_dirty_ = true;
+    }
+
+    void rebuildAnnotationPointsIfNeeded() const {
+        if (!annotation_points_dirty_) {
+            return;
+        }
+
+        size_t total_positions = 0;
+        for (const AnnotationEntry &entry : annotations_) {
+            total_positions += entry.positions.size();
+        }
+
+        std::vector<AnnotationColorPoint> points;
+        points.reserve(total_positions);
+        for (const AnnotationEntry &entry : annotations_) {
+            const QRgb color = entry.color.isValid() ? entry.color.rgba() : kDefaultAnnotationColor.rgba();
+            for (size_t position : entry.positions) {
+                points.push_back({position, color});
+            }
+        }
+
+        std::sort(points.begin(), points.end(), [](const AnnotationColorPoint &lhs, const AnnotationColorPoint &rhs) {
+            if (lhs.position != rhs.position) {
+                return lhs.position < rhs.position;
+            }
+            return lhs.color < rhs.color;
+        });
+
+        size_t write_index = 0;
+        for (size_t read_index = 0; read_index < points.size(); ++read_index) {
+            while (read_index + 1 < points.size() && points[read_index + 1].position == points[read_index].position) {
+                ++read_index;
+            }
+            points[write_index++] = points[read_index];
+        }
+        points.resize(write_index);
+
+        annotation_points_ = std::move(points);
+        annotation_points_dirty_ = false;
     }
 
     bool save(QString *error_message) const {
@@ -587,6 +638,8 @@ private:
 
     QString file_path_;
     std::vector<AnnotationEntry> annotations_;
+    mutable std::vector<AnnotationColorPoint> annotation_points_;
+    mutable bool annotation_points_dirty_ = true;
 };
 
 class NoteScrollBar : public QScrollBar {
@@ -599,7 +652,7 @@ public:
         update();
     }
 
-    void setAnnotatedPositions(const std::map<size_t, QColor> &positions) {
+    void setAnnotatedPositions(const std::vector<AnnotationColorPoint> &positions) {
         annotated_positions_ = positions;
         update();
     }
@@ -625,15 +678,15 @@ protected:
         painter.setBrush(kDefaultAnnotationColor);
 
         int previous_y = std::numeric_limits<int>::min();
-        for (const auto &[position, color] : annotated_positions_) {
-            const double ratio = static_cast<double>(position) / static_cast<double>(memory_size_);
+        for (const AnnotationColorPoint &point : annotated_positions_) {
+            const double ratio = static_cast<double>(point.position) / static_cast<double>(memory_size_);
             int y = groove.top() + static_cast<int>(std::floor(ratio * static_cast<double>(groove.height() - 1)));
             y = std::clamp(y, groove.top(), groove.bottom());
             if (y == previous_y) {
                 continue;
             }
             previous_y = y;
-            QColor marker_color = color.isValid() ? color : kDefaultAnnotationColor;
+            QColor marker_color = QColor::fromRgba(point.color);
             marker_color.setAlpha(220);
             painter.setBrush(marker_color);
             painter.drawRect(QRect(groove.left() + 1, y, std::max(2, groove.width() - 2), 2));
@@ -642,7 +695,7 @@ protected:
 
 private:
     size_t memory_size_ = 0;
-    std::map<size_t, QColor> annotated_positions_;
+    std::vector<AnnotationColorPoint> annotated_positions_;
 };
 
 class RemoteMemory {
@@ -755,7 +808,6 @@ public:
           last_seen_(memory_size_, 0),
           changed_at_(memory_size_, -1.0),
           match_mask_(memory_size_, 0),
-          annotation_colors_(memory_size_, 0U),
           selection_mask_(memory_size_, 0),
           font_("Monospace", 11) {
         
@@ -1043,13 +1095,8 @@ public:
         return ss.str();
     }
 
-    void setAnnotatedPositions(const std::map<size_t, QColor> &positions) {
-        std::fill(annotation_colors_.begin(), annotation_colors_.end(), 0U);
-        for (const auto &[index, color] : positions) {
-            if (index < annotation_colors_.size()) {
-                annotation_colors_[index] = color.isValid() ? color.rgba() : kDefaultAnnotationColor.rgba();
-            }
-        }
+    void setAnnotatedPositions(const std::vector<AnnotationColorPoint> &positions) {
+        annotation_points_ = positions;
         update();
     }
 
@@ -1072,6 +1119,13 @@ protected:
         painter.fillRect(rect(), QColor(0x14, 0x16, 0x1A));
 
         painter.setFont(font_);
+        auto annotation_it = std::lower_bound(
+            annotation_points_.begin(),
+            annotation_points_.end(),
+            first_row * kBytesPerRow,
+            [](const AnnotationColorPoint &point, size_t position) {
+                return point.position < position;
+            });
 
         for (size_t row = first_row; row < last_row; ++row) {
             const double y = static_cast<double>(row * row_height_);
@@ -1091,15 +1145,19 @@ protected:
                     break;
                 }
 
+                while (annotation_it != annotation_points_.end() && annotation_it->position < index) {
+                    ++annotation_it;
+                }
+                const bool annotated = annotation_it != annotation_points_.end() && annotation_it->position == index;
+                const QColor annotation_color = annotated ? QColor::fromRgba(annotation_it->color) : kDefaultAnnotationColor;
+
                 const double cell_x = hex_start_x_ + static_cast<double>(col * 3) * hex_cell_width_;
                 const double ascii_x = ascii_start_x_ + static_cast<double>(col) * ascii_cell_width_;
                 const bool selected = selection_mask_[index] != 0;
-                const bool annotated = annotation_colors_[index] != 0U;
                 const bool matched = match_mask_[index] != 0;
                 const double age = changed_at_[index] < 0.0 ? kFadeSeconds : (now - changed_at_[index]);
                 const double fade = std::clamp(1.0 - (age / kFadeSeconds), 0.0, 1.0);
                 const uint8_t value = byteForIndex(index);
-                const QColor annotation_color = annotated ? QColor::fromRgba(annotation_colors_[index]) : kDefaultAnnotationColor;
 
                 if (fade > 0.0 || selected || matched) {
                     double r = 0.14;
@@ -1362,7 +1420,7 @@ private:
     std::vector<uint8_t> last_seen_;
     std::vector<double> changed_at_;
     std::vector<uint8_t> match_mask_;
-    std::vector<QRgb> annotation_colors_;
+    std::vector<AnnotationColorPoint> annotation_points_;
     std::vector<uint8_t> selection_mask_;
     std::vector<size_t> matches_;
     std::vector<uint8_t> visible_cache_;
@@ -1990,7 +2048,7 @@ private:
     }
 
     void refreshAnnotationHighlights() {
-        std::map<size_t, QColor> annotated_positions;
+        std::vector<AnnotationColorPoint> annotated_positions;
         if (NoteTabState *state = currentNoteTabState()) {
             annotated_positions = state->store.annotatedPositions();
         }
