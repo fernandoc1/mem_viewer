@@ -752,6 +752,7 @@ public:
 
     void setMemorySize(size_t memory_size) {
         memory_size_ = memory_size;
+        row_count_ = memory_size_ == 0 ? 0 : ((memory_size_ + kBytesPerRow - 1) / kBytesPerRow);
         update();
     }
 
@@ -764,7 +765,7 @@ protected:
     void paintEvent(QPaintEvent *event) override {
         QScrollBar::paintEvent(event);
 
-        if (orientation() != Qt::Vertical || memory_size_ == 0 || annotated_positions_.empty()) {
+        if (orientation() != Qt::Vertical || row_count_ == 0 || annotated_positions_.empty()) {
             return;
         }
 
@@ -782,7 +783,10 @@ protected:
 
         int previous_y = std::numeric_limits<int>::min();
         for (const AnnotationColorPoint &point : annotated_positions_) {
-            const double ratio = static_cast<double>(point.position) / static_cast<double>(memory_size_);
+            const size_t row = point.position / kBytesPerRow;
+            const double ratio = row_count_ <= 1
+                ? 0.0
+                : static_cast<double>(row) / static_cast<double>(row_count_ - 1);
             int y = groove.top() + static_cast<int>(std::floor(ratio * static_cast<double>(groove.height() - 1)));
             y = std::clamp(y, groove.top(), groove.bottom());
             if (y == previous_y) {
@@ -798,6 +802,7 @@ protected:
 
 private:
     size_t memory_size_ = 0;
+    size_t row_count_ = 0;
     std::vector<AnnotationColorPoint> annotated_positions_;
 };
 
