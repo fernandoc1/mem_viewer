@@ -762,6 +762,20 @@ public:
     }
 
 protected:
+    void mousePressEvent(QMouseEvent *event) override {
+        if (event != nullptr && event->button() == Qt::LeftButton) {
+            const std::optional<size_t> row = annotatedRowForClick(event->position().toPoint());
+            if (row.has_value()) {
+                const int target = scrollbarValueForRow(*row);
+                setValue(target);
+                event->accept();
+                return;
+            }
+        }
+
+        QScrollBar::mousePressEvent(event);
+    }
+
     void paintEvent(QPaintEvent *event) override {
         QScrollBar::paintEvent(event);
 
@@ -801,6 +815,56 @@ protected:
     }
 
 private:
+    std::optional<size_t> annotatedRowForClick(const QPoint &point) const {
+        if (orientation() != Qt::Vertical || row_count_ == 0 || annotated_positions_.empty()) {
+            return std::nullopt;
+        }
+
+        QStyleOptionSlider option;
+        initStyleOption(&option);
+        const QRect groove = style()->subControlRect(QStyle::CC_ScrollBar, &option, QStyle::SC_ScrollBarGroove, this);
+        if (!groove.isValid() || groove.height() <= 0 || !groove.contains(point)) {
+            return std::nullopt;
+        }
+
+        const int click_y = std::clamp(point.y(), groove.top(), groove.bottom());
+        int previous_y = std::numeric_limits<int>::min();
+        size_t best_row = 0;
+        int best_distance = std::numeric_limits<int>::max();
+        for (const AnnotationColorPoint &annotation : annotated_positions_) {
+            const size_t row = annotation.position / kBytesPerRow;
+            const int marker_y = markerYForRow(groove, row);
+            if (marker_y == previous_y) {
+                continue;
+            }
+            previous_y = marker_y;
+            const int distance = std::min(std::abs(click_y - marker_y), std::abs(click_y - (marker_y + 1)));
+            if (distance < best_distance) {
+                best_distance = distance;
+                best_row = row;
+            }
+        }
+
+        return best_distance == std::numeric_limits<int>::max() ? std::nullopt : std::optional<size_t>(best_row);
+    }
+
+    int markerYForRow(const QRect &groove, size_t row) const {
+        const double ratio = row_count_ <= 1
+            ? 0.0
+            : static_cast<double>(row) / static_cast<double>(row_count_ - 1);
+        int y = groove.top() + static_cast<int>(std::floor(ratio * static_cast<double>(groove.height() - 1)));
+        return std::clamp(y, groove.top(), groove.bottom());
+    }
+
+    int scrollbarValueForRow(size_t row) const {
+        if (row_count_ <= 1 || maximum() <= minimum()) {
+            return minimum();
+        }
+        const double ratio = static_cast<double>(std::min(row, row_count_ - 1)) / static_cast<double>(row_count_ - 1);
+        const double value = static_cast<double>(minimum()) + ratio * static_cast<double>(maximum() - minimum());
+        return std::clamp(static_cast<int>(std::round(value)), minimum(), maximum());
+    }
+
     size_t memory_size_ = 0;
     size_t row_count_ = 0;
     std::vector<AnnotationColorPoint> annotated_positions_;
