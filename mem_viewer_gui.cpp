@@ -94,6 +94,20 @@ static bool mem_viewer_auto_refresh_forced_off() {
     return disabled;
 }
 
+static bool mem_viewer_static_file_mode() {
+    static const bool enabled = []() {
+        const char *value = std::getenv("MEM_VIEWER_STATIC_FILE");
+        return value != nullptr && value[0] != '\0' && std::strcmp(value, "0") != 0;
+    }();
+    return enabled;
+}
+
+static double mem_viewer_now_seconds() {
+    using clock = std::chrono::steady_clock;
+    const auto now = clock::now().time_since_epoch();
+    return std::chrono::duration<double>(now).count();
+}
+
 constexpr size_t kBytesPerRow = 16;
 constexpr int kRefreshMs = 100;
 constexpr double kFadeSeconds = 1.6;
@@ -383,6 +397,7 @@ public:
         if (path.isEmpty()) {
             return false;
         }
+        const double start = mem_viewer_now_seconds();
 
         file_path_ = path;
         annotations_.clear();
@@ -399,8 +414,14 @@ public:
             return false;
         }
 
+        const QByteArray json_data = file.readAll();
+        mem_viewer_debug_log("notes read path=%s bytes=%lld in %.3f s",
+            path.toLocal8Bit().constData(),
+            static_cast<long long>(json_data.size()),
+            mem_viewer_now_seconds() - start);
         QJsonParseError parse_error{};
-        const QJsonDocument document = QJsonDocument::fromJson(file.readAll(), &parse_error);
+        const double parse_start = mem_viewer_now_seconds();
+        const QJsonDocument document = QJsonDocument::fromJson(json_data, &parse_error);
         if (parse_error.error != QJsonParseError::NoError || !document.isObject()) {
             if (error_message) {
                 *error_message = QStringLiteral("Invalid JSON in %1: %2").arg(file_path_, parse_error.errorString());
@@ -440,6 +461,11 @@ public:
         }
 
         annotation_points_dirty_ = true;
+        mem_viewer_debug_log("notes parsed path=%s annotations=%zu parse=%.3f s total=%.3f s",
+            path.toLocal8Bit().constData(),
+            annotations_.size(),
+            mem_viewer_now_seconds() - parse_start,
+            mem_viewer_now_seconds() - start);
 
         return true;
     }
@@ -837,7 +863,9 @@ public:
         
         timer_ = new QTimer(this);
         connect(timer_, &QTimer::timeout, this, [this]() { onTimer(); });
-        timer_->start(kRefreshMs);
+        if (!mem_viewer_auto_refresh_forced_off()) {
+            timer_->start(kRefreshMs);
+        }
         
         refreshVisibleBytes();
     }
@@ -870,7 +898,7 @@ public:
         const size_t last_row = std::min(rows_, first_row + visible_rows);
         const size_t begin = std::min(memory_size_, first_row * kBytesPerRow);
         const size_t end = std::min(memory_size_, last_row * kBytesPerRow);
-        const double now = now_seconds();
+        const double now = mem_viewer_now_seconds();
 
         visible_begin_ = begin;
         visible_end_ = end;
@@ -1042,7 +1070,7 @@ public:
             return;
         }
         last_seen_[selected_index] = value;
-        changed_at_[selected_index] = now_seconds();
+        changed_at_[selected_index] = mem_viewer_now_seconds();
         refreshVisibleBytes();
     }
 
@@ -1114,7 +1142,7 @@ protected:
         const size_t first_row = static_cast<size_t>(std::max(0, static_cast<int>(std::floor(scroll_y / row_height_))));
         const size_t visible_rows = static_cast<size_t>(std::ceil(visible_height / row_height_)) + 2;
         const size_t last_row = std::min(rows_, first_row + visible_rows);
-        const double now = now_seconds();
+        const double now = mem_viewer_now_seconds();
 
         painter.fillRect(rect(), QColor(0x14, 0x16, 0x1A));
 
@@ -1316,12 +1344,6 @@ private:
         return std::isprint(static_cast<unsigned char>(value)) != 0 ? static_cast<char>(value) : '.';
     }
 
-    static double now_seconds() {
-        using clock = std::chrono::steady_clock;
-        const auto now = clock::now().time_since_epoch();
-        return std::chrono::duration<double>(now).count();
-    }
-
     void scroll_to_index(size_t index) {
         QScrollBar *vscroll = verticalScrollBar();
         if (!vscroll) return;
@@ -1502,6 +1524,7 @@ public:
         std::function<bool(size_t, const void *, size_t)> write_memory,
         std::atomic<bool> &open_flag)
         : open_flag_(open_flag) {
+        const double constructor_start = mem_viewer_now_seconds();
         
         setWindowTitle("Memory Viewer");
         resize(900, 680);
@@ -1736,14 +1759,34 @@ public:
             updateStatus();
         });
 
-        loadNoteFilesFromEnvironment();
-        refreshAnnotationHighlights();
+        if (!mem_viewer_static_file_mode()) {
+            loadNoteFilesFromEnvironment();
+            note_files_loaded_ = true;
+            refreshAnnotationHighlights();
+        }
         updateStatus(std::numeric_limits<size_t>::max(), 0);
         updateAnnotationUi();
+        mem_viewer_debug_log("window constructed in %.3f s%s",
+            mem_viewer_now_seconds() - constructor_start,
+            mem_viewer_static_file_mode() ? " (notes deferred)" : "");
     }
 
     ~MemViewerWindow() override {
         open_flag_.store(false, std::memory_order_relaxed);
+    }
+
+    void loadDeferredNoteFiles() {
+        if (note_files_loaded_) {
+            return;
+        }
+        note_files_loaded_ = true;
+        const double start = mem_viewer_now_seconds();
+        mem_viewer_debug_log("loading deferred note files");
+        loadNoteFilesFromEnvironment();
+        refreshAnnotationHighlights();
+        updateStatus();
+        updateAnnotationUi();
+        mem_viewer_debug_log("deferred note loading finished in %.3f s", mem_viewer_now_seconds() - start);
     }
 
 private:
@@ -1812,11 +1855,16 @@ private:
         if (path.isEmpty()) {
             return;
         }
+        const double start = mem_viewer_now_seconds();
+        mem_viewer_debug_log("selectAnnotationFile begin path=%s", path.toLocal8Bit().constData());
 
         if (int existing_index = findNoteTabByPath(path); existing_index >= 0) {
             notes_file_tabs_->setCurrentIndex(existing_index);
             updateAnnotationUi();
             updateStatus();
+            mem_viewer_debug_log("selectAnnotationFile reused existing tab path=%s in %.3f s",
+                path.toLocal8Bit().constData(),
+                mem_viewer_now_seconds() - start);
             return;
         }
 
@@ -1885,6 +1933,9 @@ private:
         refreshAnnotationHighlights();
         updateAnnotationUi();
         updateStatus();
+        mem_viewer_debug_log("selectAnnotationFile finished path=%s in %.3f s",
+            path.toLocal8Bit().constData(),
+            mem_viewer_now_seconds() - start);
     }
 
     void loadNoteFilesFromEnvironment() {
@@ -1894,6 +1945,7 @@ private:
         }
 
         const std::vector<QString> note_paths = split_note_file_list(QString::fromLocal8Bit(env_value));
+        mem_viewer_debug_log("loading %zu note file(s) from environment", note_paths.size());
         for (const QString &path : note_paths) {
             selectAnnotationFile(path);
         }
@@ -2183,6 +2235,7 @@ private:
     std::vector<std::unique_ptr<NoteTabState>> note_tabs_;
     std::vector<size_t> current_selection_;
     std::string last_search_signature_;
+    bool note_files_loaded_ = false;
 };
 
 }  // namespace
@@ -2211,6 +2264,9 @@ int mem_viewer_run_gui(pid_t target_pid, uintptr_t target_address, size_t size) 
     
     open_flag.store(true, std::memory_order_relaxed);
     window->show();
+    if (mem_viewer_static_file_mode()) {
+        QTimer::singleShot(0, window, [window]() { window->loadDeferredNoteFiles(); });
+    }
     mem_viewer_debug_log("window shown");
 
     const int rc = app.exec();
@@ -2237,6 +2293,9 @@ int mem_viewer_run_gui_shared(void *memory_ptr, size_t size) {
     
     open_flag.store(true, std::memory_order_relaxed);
     window->show();
+    if (mem_viewer_static_file_mode()) {
+        QTimer::singleShot(0, window, [window]() { window->loadDeferredNoteFiles(); });
+    }
     mem_viewer_debug_log("shared window shown");
 
     const int rc = app.exec();

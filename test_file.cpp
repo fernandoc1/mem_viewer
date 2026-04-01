@@ -63,6 +63,11 @@ int main(int argc, char **argv) {
         mem_viewer_shared_free(buffer, buffer_size);
         return 1;
     }
+    if (setenv("MEM_VIEWER_STATIC_FILE", "1", 1) != 0) {
+        std::cerr << "failed to set MEM_VIEWER_STATIC_FILE\n";
+        mem_viewer_shared_free(buffer, buffer_size);
+        return 1;
+    }
 
     MemViewer *viewer = mem_viewer_open_shared(buffer, buffer_size);
     if (!viewer) {
