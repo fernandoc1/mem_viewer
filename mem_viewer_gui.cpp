@@ -33,6 +33,8 @@
 #include <QKeySequence>
 #include <QSignalBlocker>
 #include <QTextEdit>
+#include <QTextBrowser>
+#include <QUrl>
 #include <QWheelEvent>
 #include <QResizeEvent>
 #include <QMainWindow>
@@ -130,6 +132,33 @@ struct AnnotationEntry {
 struct AnnotationColorPoint {
     size_t position = 0;
     QRgb color = 0U;
+};
+
+class NotePreview : public QTextBrowser {
+public:
+    explicit NotePreview(QWidget *parent = nullptr)
+        : QTextBrowser(parent) {
+        setOpenLinks(false);
+        setOpenExternalLinks(false);
+        setReadOnly(true);
+    }
+
+    std::function<void(const QUrl&)> onLinkActivated;
+
+protected:
+    void mouseReleaseEvent(QMouseEvent *event) override {
+        if(event != nullptr && event->button() == Qt::LeftButton && (event->modifiers() & Qt::ControlModifier) != 0) {
+            const QString anchor = anchorAt(event->position().toPoint());
+            if(!anchor.isEmpty()) {
+                if(onLinkActivated) {
+                    onLinkActivated(QUrl(anchor));
+                }
+                event->accept();
+                return;
+            }
+        }
+        QTextBrowser::mouseReleaseEvent(event);
+    }
 };
 
 enum class SearchFormat {
@@ -372,6 +401,36 @@ static std::vector<QString> split_note_file_list(const QString &value) {
         }
     }
     return paths;
+}
+
+static QString note_text_to_html(const QString &note) {
+    QString html;
+    html.reserve(note.size() * 2);
+
+    int position = 0;
+    while(position < note.size()) {
+        const int marker_start = note.indexOf(QStringLiteral("[[jump:"), position);
+        if(marker_start < 0) {
+            html += note.mid(position).toHtmlEscaped().replace(QLatin1Char('\n'), QStringLiteral("<br/>"));
+            break;
+        }
+
+        html += note.mid(position, marker_start - position).toHtmlEscaped().replace(QLatin1Char('\n'), QStringLiteral("<br/>"));
+        const int separator = note.indexOf(QLatin1Char('|'), marker_start + 7);
+        const int marker_end = note.indexOf(QStringLiteral("]]"), marker_start + 7);
+        if(separator < 0 || marker_end < 0 || separator > marker_end) {
+            html += note.mid(marker_start).toHtmlEscaped().replace(QLatin1Char('\n'), QStringLiteral("<br/>"));
+            break;
+        }
+
+        const QString target = note.mid(marker_start + 7, separator - (marker_start + 7)).trimmed();
+        const QString label = note.mid(separator + 1, marker_end - (separator + 1));
+        html += QStringLiteral("<a href=\"jump:%1\">%2</a>")
+            .arg(target.toHtmlEscaped(), label.toHtmlEscaped());
+        position = marker_end + 2;
+    }
+
+    return QStringLiteral("<html><body style=\"font-family: monospace; white-space: pre-wrap;\">%1</body></html>").arg(html);
 }
 
 class AnnotationStore {
@@ -1670,6 +1729,7 @@ public:
         QWidget *page = nullptr;
         QLabel *selection_label = nullptr;
         QLabel *file_label = nullptr;
+        NotePreview *preview = nullptr;
         QTextEdit *editor = nullptr;
         QPushButton *color_button = nullptr;
         QPushButton *clear_button = nullptr;
@@ -2076,6 +2136,12 @@ private:
         note_tab->file_label->setWordWrap(true);
         annotation_layout->addWidget(note_tab->file_label);
 
+        note_tab->preview = new NotePreview();
+        note_tab->preview->setPlaceholderText("Ctrl+click a rendered link to jump to its target");
+        note_tab->preview->setMinimumHeight(72);
+        note_tab->preview->setEnabled(false);
+        annotation_layout->addWidget(note_tab->preview);
+
         note_tab->editor = new QTextEdit();
         note_tab->editor->setPlaceholderText("Select one or more bytes and type notes here");
         note_tab->editor->setEnabled(false);
@@ -2103,6 +2169,11 @@ private:
         connect(note_tab->editor, &QTextEdit::textChanged, this, [this, raw = note_tab.get()]() {
             onAnnotationEdited(raw);
         });
+        note_tab->preview->onLinkActivated = [this](const QUrl &url) {
+            if(url.scheme() == QStringLiteral("jump")) {
+                jumpToNoteLink(url.path().isEmpty() ? url.toString().mid(5) : url.path());
+            }
+        };
         connect(note_tab->color_button, &QPushButton::clicked, this, [this, raw = note_tab.get()]() {
             chooseAnnotationColor(raw);
         });
@@ -2193,6 +2264,19 @@ private:
         viewer_widget_->jumpToIndex(index);
     }
 
+    void jumpToNoteLink(const QString &targetText) {
+        if(viewer_widget_ == nullptr) {
+            return;
+        }
+
+        size_t index = 0;
+        if(!parse_memory_position(targetText.toStdString(), viewer_widget_->getMemorySize(), index)) {
+            mem_viewer_debug_log("note link target parse failed: %s", targetText.toLocal8Bit().constData());
+            return;
+        }
+        viewer_widget_->jumpToIndex(index);
+    }
+
     void onSelectionChanged(const std::vector<size_t> &selection) {
         const double start = mem_viewer_now_seconds();
         current_selection_ = selection;
@@ -2229,6 +2313,10 @@ private:
     void onAnnotationEdited(NoteTabState *state) {
         if (state == nullptr) {
             return;
+        }
+
+        if(state->preview != nullptr) {
+            state->preview->setHtml(note_text_to_html(state->editor->toPlainText()));
         }
 
         if (current_selection_.empty()) {
@@ -2345,6 +2433,10 @@ private:
 
         state.active_annotation = state.store.resolveForSelection(current_selection_);
         const QString note = QString::fromStdString(state.active_annotation.note);
+        if (state.preview != nullptr) {
+            state.preview->setEnabled(!note.isEmpty());
+            state.preview->setHtml(note_text_to_html(note));
+        }
         if (state.editor->toPlainText() != note) {
             const QSignalBlocker blocker(state.editor);
             state.editor->setPlainText(note);
