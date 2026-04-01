@@ -56,6 +56,7 @@
 #include <optional>
 #include <sstream>
 #include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 #include <sys/prctl.h>
@@ -401,6 +402,7 @@ public:
 
         file_path_ = path;
         annotations_.clear();
+        position_to_annotation_indices_.clear();
 
         QFile file(file_path_);
         if (!file.exists()) {
@@ -461,6 +463,9 @@ public:
         }
 
         annotation_points_dirty_ = true;
+        annotation_lookup_dirty_ = true;
+        rebuildAnnotationPointsIfNeeded();
+        rebuildLookupIfNeeded();
         mem_viewer_debug_log("notes parsed path=%s annotations=%zu parse=%.3f s total=%.3f s",
             path.toLocal8Bit().constData(),
             annotations_.size(),
@@ -474,26 +479,59 @@ public:
         if (positions.empty()) {
             return {};
         }
-
-        for (const AnnotationEntry &entry : annotations_) {
-            if (entry.positions == positions) {
-                return {entry.positions, entry.note, entry.color};
-            }
-        }
+        const double start = mem_viewer_now_seconds();
+        rebuildLookupIfNeeded();
 
         const AnnotationEntry *best_match = nullptr;
-        for (const AnnotationEntry &entry : annotations_) {
+        auto consider_entry = [&](const AnnotationEntry &entry) {
+            if (entry.positions == positions) {
+                best_match = &entry;
+                return true;
+            }
             if (!containsAllPositions(entry.positions, positions)) {
-                continue;
+                return false;
             }
             if (best_match == nullptr || entry.positions.size() < best_match->positions.size()) {
                 best_match = &entry;
             }
+            return false;
+        };
+
+        if (const auto candidates_it = position_to_annotation_indices_.find(positions.front());
+            candidates_it != position_to_annotation_indices_.end()) {
+            for (size_t entry_index : candidates_it->second) {
+                if (entry_index >= annotations_.size()) {
+                    continue;
+                }
+                if (consider_entry(annotations_[entry_index])) {
+                    mem_viewer_debug_log("resolveForSelection positions=%zu candidates=%zu fast=1 elapsed=%.6f s",
+                        positions.size(),
+                        candidates_it->second.size(),
+                        mem_viewer_now_seconds() - start);
+                    return {best_match->positions, best_match->note, best_match->color};
+                }
+            }
+        }
+
+        for (const AnnotationEntry &entry : annotations_) {
+            if (consider_entry(entry)) {
+                mem_viewer_debug_log("resolveForSelection positions=%zu candidates=%zu fast=0 elapsed=%.6f s",
+                    positions.size(),
+                    annotations_.size(),
+                    mem_viewer_now_seconds() - start);
+                return {best_match->positions, best_match->note, best_match->color};
+            }
         }
 
         if (best_match == nullptr) {
+            mem_viewer_debug_log("resolveForSelection positions=%zu candidates=0 elapsed=%.6f s",
+                positions.size(),
+                mem_viewer_now_seconds() - start);
             return {};
         }
+        mem_viewer_debug_log("resolveForSelection positions=%zu elapsed=%.6f s",
+            positions.size(),
+            mem_viewer_now_seconds() - start);
         return {best_match->positions, best_match->note, best_match->color};
     }
 
@@ -513,6 +551,7 @@ public:
             annotations_.push_back(std::move(entry));
         }
         annotation_points_dirty_ = true;
+        annotation_lookup_dirty_ = true;
         return save(error_message);
     }
 
@@ -523,6 +562,7 @@ public:
 
         removePositionsFromAnnotations(normalizePositions(positions));
         annotation_points_dirty_ = true;
+        annotation_lookup_dirty_ = true;
         return save(error_message);
     }
 
@@ -588,6 +628,7 @@ private:
 
         annotations_ = std::move(updated_annotations);
         annotation_points_dirty_ = true;
+        annotation_lookup_dirty_ = true;
     }
 
     void rebuildAnnotationPointsIfNeeded() const {
@@ -629,6 +670,40 @@ private:
         annotation_points_dirty_ = false;
     }
 
+    void rebuildLookupIfNeeded() const {
+        if (!annotation_lookup_dirty_) {
+            return;
+        }
+
+        const double start = mem_viewer_now_seconds();
+        std::unordered_map<size_t, std::vector<size_t>> lookup;
+        lookup.reserve(annotation_points_.empty() ? annotations_.size() : annotation_points_.size());
+        for (size_t entry_index = 0; entry_index < annotations_.size(); ++entry_index) {
+            const AnnotationEntry &entry = annotations_[entry_index];
+            for (size_t position : entry.positions) {
+                lookup[position].push_back(entry_index);
+            }
+        }
+
+        for (auto &[position, indices] : lookup) {
+            std::sort(indices.begin(), indices.end(), [this](size_t lhs, size_t rhs) {
+                const size_t lhs_size = lhs < annotations_.size() ? annotations_[lhs].positions.size() : std::numeric_limits<size_t>::max();
+                const size_t rhs_size = rhs < annotations_.size() ? annotations_[rhs].positions.size() : std::numeric_limits<size_t>::max();
+                if (lhs_size != rhs_size) {
+                    return lhs_size < rhs_size;
+                }
+                return lhs < rhs;
+            });
+        }
+
+        position_to_annotation_indices_ = std::move(lookup);
+        annotation_lookup_dirty_ = false;
+        mem_viewer_debug_log("annotation lookup rebuilt entries=%zu positions=%zu in %.3f s",
+            annotations_.size(),
+            position_to_annotation_indices_.size(),
+            mem_viewer_now_seconds() - start);
+    }
+
     bool save(QString *error_message) const {
         if (file_path_.isEmpty()) {
             return true;
@@ -666,6 +741,8 @@ private:
     std::vector<AnnotationEntry> annotations_;
     mutable std::vector<AnnotationColorPoint> annotation_points_;
     mutable bool annotation_points_dirty_ = true;
+    mutable std::unordered_map<size_t, std::vector<size_t>> position_to_annotation_indices_;
+    mutable bool annotation_lookup_dirty_ = true;
 };
 
 class NoteScrollBar : public QScrollBar {
@@ -883,6 +960,7 @@ public:
     }
 
     void refreshVisibleBytes() {
+        const double start = mem_viewer_now_seconds();
         if (memory_size_ == 0) {
             update();
             return;
@@ -930,6 +1008,14 @@ public:
         }
 
         update();
+        if (!logged_first_refresh_) {
+            logged_first_refresh_ = true;
+            mem_viewer_debug_log("refreshVisibleBytes first begin=%zu end=%zu cache=%zu elapsed=%.6f s",
+                begin,
+                end,
+                visible_cache_.size(),
+                mem_viewer_now_seconds() - start);
+        }
     }
 
     void rebuildSearch(const std::string &search_text, SearchFormat format, EndianMode endian, size_t width) {
@@ -1133,6 +1219,7 @@ public:
 
 protected:
     void paintEvent(QPaintEvent *) override {
+        const double start = mem_viewer_now_seconds();
         QPainter painter(this);
         painter.setRenderHint(QPainter::Antialiasing);
         
@@ -1249,6 +1336,12 @@ protected:
                     ascii_color,
                     ascii);
             }
+        }
+        if (!logged_first_paint_) {
+            logged_first_paint_ = true;
+            mem_viewer_debug_log("paintEvent first rows=%zu elapsed=%.6f s",
+                last_row > first_row ? (last_row - first_row) : 0,
+                mem_viewer_now_seconds() - start);
         }
     }
 
@@ -1454,6 +1547,8 @@ private:
     size_t selection_drag_anchor_ = std::numeric_limits<size_t>::max();
     std::vector<size_t> selected_indices_;
     bool drag_selecting_ = false;
+    bool logged_first_refresh_ = false;
+    bool logged_first_paint_ = false;
 
     QFont font_;
     double char_width_;
@@ -2006,6 +2101,7 @@ private:
     }
 
     void onSelectionChanged(const std::vector<size_t> &selection) {
+        const double start = mem_viewer_now_seconds();
         current_selection_ = selection;
 
         const size_t single_index = viewer_widget_ ? viewer_widget_->getSelectedIndex() : std::numeric_limits<size_t>::max();
@@ -2022,6 +2118,9 @@ private:
         apply_button_->setEnabled(selection.size() == 1);
         updateAnnotationUi();
         updateStatus();
+        mem_viewer_debug_log("onSelectionChanged bytes=%zu elapsed=%.6f s",
+            selection.size(),
+            mem_viewer_now_seconds() - start);
     }
 
     void updateAnnotationUi() {
@@ -2029,8 +2128,8 @@ private:
             return;
         }
 
-        for (const auto &note_tab : note_tabs_) {
-            updateAnnotationUiForTab(*note_tab);
+        if (NoteTabState *state = currentNoteTabState()) {
+            updateAnnotationUiForTab(*state);
         }
     }
 
@@ -2134,11 +2233,17 @@ private:
     }
 
     void updateAnnotationUiForTab(NoteTabState &state) {
-        state.selection_label->setText(selection_summary_text(current_selection_));
-        state.file_label->setText(
-            state.store.hasFilePath()
-                ? QStringLiteral("Annotation file: %1").arg(state.store.filePath())
-                : QStringLiteral("Annotation file: not selected"));
+        const double start = mem_viewer_now_seconds();
+        const QString selection_text = selection_summary_text(current_selection_);
+        if (state.selection_label->text() != selection_text) {
+            state.selection_label->setText(selection_text);
+        }
+        const QString file_text = state.store.hasFilePath()
+            ? QStringLiteral("Annotation file: %1").arg(state.store.filePath())
+            : QStringLiteral("Annotation file: not selected");
+        if (state.file_label->text() != file_text) {
+            state.file_label->setText(file_text);
+        }
 
         const bool can_edit = !current_selection_.empty();
         state.editor->setEnabled(can_edit);
@@ -2147,10 +2252,16 @@ private:
 
         state.active_annotation = state.store.resolveForSelection(current_selection_);
         const QString note = QString::fromStdString(state.active_annotation.note);
-        const QSignalBlocker blocker(state.editor);
-        state.editor->setPlainText(note);
+        if (state.editor->toPlainText() != note) {
+            const QSignalBlocker blocker(state.editor);
+            state.editor->setPlainText(note);
+        }
         state.current_color = state.active_annotation.isValid() ? state.active_annotation.color : kDefaultAnnotationColor;
         updateAnnotationColorButton(state);
+        mem_viewer_debug_log("updateAnnotationUiForTab selection=%zu note_bytes=%zu elapsed=%.6f s",
+            current_selection_.size(),
+            note.size(),
+            mem_viewer_now_seconds() - start);
     }
 
     int findNoteTabByPath(const QString &path) const {
@@ -2265,7 +2376,7 @@ int mem_viewer_run_gui(pid_t target_pid, uintptr_t target_address, size_t size) 
     open_flag.store(true, std::memory_order_relaxed);
     window->show();
     if (mem_viewer_static_file_mode()) {
-        QTimer::singleShot(0, window, [window]() { window->loadDeferredNoteFiles(); });
+        QTimer::singleShot(50, window, [window]() { window->loadDeferredNoteFiles(); });
     }
     mem_viewer_debug_log("window shown");
 
@@ -2294,7 +2405,7 @@ int mem_viewer_run_gui_shared(void *memory_ptr, size_t size) {
     open_flag.store(true, std::memory_order_relaxed);
     window->show();
     if (mem_viewer_static_file_mode()) {
-        QTimer::singleShot(0, window, [window]() { window->loadDeferredNoteFiles(); });
+        QTimer::singleShot(50, window, [window]() { window->loadDeferredNoteFiles(); });
     }
     mem_viewer_debug_log("shared window shown");
 
