@@ -745,10 +745,13 @@ private:
     mutable bool annotation_lookup_dirty_ = true;
 };
 
-class NoteScrollBar : public QScrollBar {
+class NoteScrollBar : public QWidget {
 public:
-    explicit NoteScrollBar(Qt::Orientation orientation, QWidget *parent = nullptr)
-        : QScrollBar(orientation, parent) {}
+    explicit NoteScrollBar(QWidget *parent = nullptr)
+        : QWidget(parent) {
+        setFixedWidth(10);
+        setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Expanding);
+    }
 
     void setMemorySize(size_t memory_size) {
         memory_size_ = memory_size;
@@ -761,31 +764,35 @@ public:
         update();
     }
 
+    std::function<void(size_t)> onAnnotatedRowActivated;
+
 protected:
     void mousePressEvent(QMouseEvent *event) override {
         if (event != nullptr && event->button() == Qt::LeftButton) {
             const std::optional<size_t> row = annotatedRowForClick(event->position().toPoint());
             if (row.has_value()) {
-                const int target = scrollbarValueForRow(*row);
-                setValue(target);
+                if (onAnnotatedRowActivated) {
+                    onAnnotatedRowActivated(*row);
+                }
                 event->accept();
                 return;
             }
         }
 
-        QScrollBar::mousePressEvent(event);
+        QWidget::mousePressEvent(event);
     }
 
     void paintEvent(QPaintEvent *event) override {
-        QScrollBar::paintEvent(event);
+        QWidget::paintEvent(event);
 
-        if (orientation() != Qt::Vertical || row_count_ == 0 || annotated_positions_.empty()) {
+        QPainter background_painter(this);
+        background_painter.fillRect(rect(), palette().window().color().darker(108));
+
+        if (row_count_ == 0 || annotated_positions_.empty()) {
             return;
         }
 
-        QStyleOptionSlider option;
-        initStyleOption(&option);
-        const QRect groove = style()->subControlRect(QStyle::CC_ScrollBar, &option, QStyle::SC_ScrollBarGroove, this);
+        const QRect groove = rect().adjusted(1, 2, -1, -2);
         if (!groove.isValid() || groove.height() <= 0) {
             return;
         }
@@ -816,13 +823,11 @@ protected:
 
 private:
     std::optional<size_t> annotatedRowForClick(const QPoint &point) const {
-        if (orientation() != Qt::Vertical || row_count_ == 0 || annotated_positions_.empty()) {
+        if (row_count_ == 0 || annotated_positions_.empty()) {
             return std::nullopt;
         }
 
-        QStyleOptionSlider option;
-        initStyleOption(&option);
-        const QRect groove = style()->subControlRect(QStyle::CC_ScrollBar, &option, QStyle::SC_ScrollBarGroove, this);
+        const QRect groove = rect().adjusted(1, 2, -1, -2);
         if (!groove.isValid() || groove.height() <= 0 || !groove.contains(point)) {
             return std::nullopt;
         }
@@ -854,15 +859,6 @@ private:
             : static_cast<double>(row) / static_cast<double>(row_count_ - 1);
         int y = groove.top() + static_cast<int>(std::floor(ratio * static_cast<double>(groove.height() - 1)));
         return std::clamp(y, groove.top(), groove.bottom());
-    }
-
-    int scrollbarValueForRow(size_t row) const {
-        if (row_count_ <= 1 || maximum() <= minimum()) {
-            return minimum();
-        }
-        const double ratio = static_cast<double>(std::min(row, row_count_ - 1)) / static_cast<double>(row_count_ - 1);
-        const double value = static_cast<double>(minimum()) + ratio * static_cast<double>(maximum() - minimum());
-        return std::clamp(static_cast<int>(std::round(value)), minimum(), maximum());
     }
 
     size_t memory_size_ = 0;
@@ -1707,14 +1703,20 @@ public:
         main_layout->setContentsMargins(0, 0, 0, 0);
         main_layout->setSpacing(0);
 
+        QWidget *viewer_panel = new QWidget();
+        QHBoxLayout *viewer_layout = new QHBoxLayout(viewer_panel);
+        viewer_layout->setContentsMargins(0, 0, 0, 0);
+        viewer_layout->setSpacing(4);
+
         scroll_area_ = new QScrollArea();
         scroll_area_->setWidgetResizable(true);
         scroll_area_->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
         scroll_area_->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
-        note_scroll_bar_ = new NoteScrollBar(Qt::Vertical, scroll_area_);
+        note_scroll_bar_ = new NoteScrollBar(viewer_panel);
         note_scroll_bar_->setMemorySize(memory_size);
-        scroll_area_->setVerticalScrollBar(note_scroll_bar_);
-        main_layout->addWidget(scroll_area_);
+        viewer_layout->addWidget(scroll_area_);
+        viewer_layout->addWidget(note_scroll_bar_);
+        main_layout->addWidget(viewer_panel);
 
         QWidget *side_panel = new QWidget();
         side_panel->setFixedWidth(260);
@@ -1900,11 +1902,28 @@ public:
 
         viewer_widget_ = new MemViewerWidget(memory_size, read_memory, write_memory, open_flag, scroll_area_);
         scroll_area_->setWidget(viewer_widget_);
-        connect(note_scroll_bar_, &QScrollBar::valueChanged, this, [this](int) {
+        connect(scroll_area_->verticalScrollBar(), &QScrollBar::valueChanged, this, [this](int) {
             if (viewer_widget_) {
                 viewer_widget_->refreshVisibleBytes();
             }
         });
+        note_scroll_bar_->onAnnotatedRowActivated = [this](size_t row) {
+            if (scroll_area_ == nullptr) {
+                return;
+            }
+            QScrollBar *scroll_bar = scroll_area_->verticalScrollBar();
+            if (scroll_bar == nullptr) {
+                return;
+            }
+            const size_t row_count = viewer_widget_ == nullptr ? 0 : ((viewer_widget_->getMemorySize() + kBytesPerRow - 1) / kBytesPerRow);
+            if (row_count <= 1 || scroll_bar->maximum() <= scroll_bar->minimum()) {
+                scroll_bar->setValue(scroll_bar->minimum());
+                return;
+            }
+            const double ratio = static_cast<double>(std::min(row, row_count - 1)) / static_cast<double>(row_count - 1);
+            const double value = static_cast<double>(scroll_bar->minimum()) + ratio * static_cast<double>(scroll_bar->maximum() - scroll_bar->minimum());
+            scroll_bar->setValue(std::clamp(static_cast<int>(std::round(value)), scroll_bar->minimum(), scroll_bar->maximum()));
+        };
 
         viewer_widget_->onSelectionChanged = [this](const std::vector<size_t> &selection) {
             onSelectionChanged(selection);
