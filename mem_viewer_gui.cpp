@@ -630,6 +630,21 @@ public:
         return annotation_points_;
     }
 
+    std::vector<ResolvedAnnotation> searchNotes(const QString &query) const {
+        std::vector<ResolvedAnnotation> matches;
+        if(query.trimmed().isEmpty()) {
+            return matches;
+        }
+
+        const QString needle = query.toCaseFolded();
+        for(const AnnotationEntry &entry : annotations_) {
+            if(QString::fromStdString(entry.note).toCaseFolded().contains(needle)) {
+                matches.push_back({entry.positions, entry.note, entry.color});
+            }
+        }
+        return matches;
+    }
+
 private:
     static std::vector<size_t> normalizePositions(const std::vector<size_t> &positions) {
         std::vector<size_t> unique_positions = positions;
@@ -1736,6 +1751,9 @@ public:
         AnnotationStore store;
         AnnotationStore::ResolvedAnnotation active_annotation;
         QColor current_color = kDefaultAnnotationColor;
+        std::vector<AnnotationStore::ResolvedAnnotation> search_matches;
+        int active_search_match = -1;
+        QString last_search_query;
     };
 
     MemViewerWindow(
@@ -1936,10 +1954,45 @@ public:
         notes_layout->setContentsMargins(0, 0, 0, 0);
         notes_layout->setSpacing(8);
 
+        QFrame *notes_search_frame = new QFrame();
+        notes_search_frame->setFrameStyle(QFrame::Box | QFrame::Raised);
+        QVBoxLayout *notes_search_layout = new QVBoxLayout(notes_search_frame);
+        notes_search_layout->setContentsMargins(8, 8, 8, 8);
+        notes_search_layout->setSpacing(6);
+        notes_search_layout->addWidget(new QLabel("Search notes"));
+        notes_search_entry_ = new QLineEdit();
+        notes_search_entry_->setPlaceholderText("Text in note");
+        notes_search_layout->addWidget(notes_search_entry_);
+        QHBoxLayout *notes_search_nav = new QHBoxLayout();
+        notes_prev_button_ = new QPushButton("Prev");
+        notes_next_button_ = new QPushButton("Next");
+        notes_search_nav->addWidget(notes_prev_button_);
+        notes_search_nav->addWidget(notes_next_button_);
+        notes_search_layout->addLayout(notes_search_nav);
+        notes_layout->addWidget(notes_search_frame);
+
         notes_file_tabs_ = new QTabWidget();
         notes_layout->addWidget(notes_file_tabs_);
         notes_layout->addStretch();
         side_tabs->addTab(notes_tab, "Notes");
+
+        connect(notes_search_entry_, &QLineEdit::returnPressed, this, [this]() {
+            navigateNoteSearch(1, true);
+        });
+        connect(notes_search_entry_, &QLineEdit::textChanged, this, [this](const QString &) {
+            if(NoteTabState *state = currentNoteTabState()) {
+                state->search_matches.clear();
+                state->active_search_match = -1;
+                state->last_search_query.clear();
+            }
+            updateNotesSearchUi();
+        });
+        connect(notes_prev_button_, &QPushButton::clicked, this, [this]() {
+            navigateNoteSearch(-1, false);
+        });
+        connect(notes_next_button_, &QPushButton::clicked, this, [this]() {
+            navigateNoteSearch(1, false);
+        });
 
         side_layout->addWidget(side_tabs);
 
@@ -2277,6 +2330,45 @@ private:
         viewer_widget_->jumpToIndex(index);
     }
 
+    void navigateToNoteMatch(NoteTabState &state) {
+        if(viewer_widget_ == nullptr || state.active_search_match < 0 ||
+           state.active_search_match >= static_cast<int>(state.search_matches.size())) {
+            return;
+        }
+
+        const AnnotationStore::ResolvedAnnotation &match = state.search_matches[static_cast<size_t>(state.active_search_match)];
+        if(match.positions.empty()) {
+            return;
+        }
+        viewer_widget_->jumpToIndex(match.positions.front());
+    }
+
+    void navigateNoteSearch(int direction, bool rebuildMatches) {
+        NoteTabState *state = currentNoteTabState();
+        if(state == nullptr) {
+            return;
+        }
+
+        const QString query = notes_search_entry_ == nullptr ? QString() : notes_search_entry_->text();
+        if(rebuildMatches || query != state->last_search_query) {
+            state->search_matches = state->store.searchNotes(query);
+            state->active_search_match = state->search_matches.empty() ? -1 : (direction < 0 ? static_cast<int>(state->search_matches.size()) - 1 : 0);
+            state->last_search_query = query;
+        } else if(!state->search_matches.empty()) {
+            const int count = static_cast<int>(state->search_matches.size());
+            if(state->active_search_match < 0 || state->active_search_match >= count) {
+                state->active_search_match = 0;
+            } else if(direction < 0) {
+                state->active_search_match = (state->active_search_match + count - 1) % count;
+            } else {
+                state->active_search_match = (state->active_search_match + 1) % count;
+            }
+        }
+
+        navigateToNoteMatch(*state);
+        updateStatus();
+    }
+
     void onSelectionChanged(const std::vector<size_t> &selection) {
         const double start = mem_viewer_now_seconds();
         current_selection_ = selection;
@@ -2308,6 +2400,7 @@ private:
         if (NoteTabState *state = currentNoteTabState()) {
             updateAnnotationUiForTab(*state);
         }
+        updateNotesSearchUi();
     }
 
     void onAnnotationEdited(NoteTabState *state) {
@@ -2449,6 +2542,18 @@ private:
             mem_viewer_now_seconds() - start);
     }
 
+    void updateNotesSearchUi() {
+        NoteTabState *state = currentNoteTabState();
+        const bool has_query = notes_search_entry_ != nullptr && !notes_search_entry_->text().trimmed().isEmpty();
+        const bool has_matches = state != nullptr && !state->search_matches.empty();
+        if(notes_prev_button_ != nullptr) {
+            notes_prev_button_->setEnabled(has_query && has_matches);
+        }
+        if(notes_next_button_ != nullptr) {
+            notes_next_button_->setEnabled(has_query && has_matches);
+        }
+    }
+
     int findNoteTabByPath(const QString &path) const {
         for (size_t i = 0; i < note_tabs_.size(); ++i) {
             if (note_tabs_[i]->store.filePath() == path) {
@@ -2526,6 +2631,9 @@ private:
     QPushButton *next_button_;
     QLineEdit *edit_entry_;
     QPushButton *apply_button_;
+    QLineEdit *notes_search_entry_;
+    QPushButton *notes_prev_button_;
+    QPushButton *notes_next_button_;
     QTabWidget *notes_file_tabs_;
     QLabel *status_label_;
     std::vector<std::unique_ptr<NoteTabState>> note_tabs_;
