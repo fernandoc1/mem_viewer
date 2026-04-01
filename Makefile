@@ -22,7 +22,7 @@ GUI_OBJECTS := $(GUI_SOURCES:.cpp=.o)
 COMPARE_MOC := moc_comparison_window.cpp moc_comparison_widget.cpp
 COMPARE_MOC_OBJECTS := $(COMPARE_MOC:.cpp=.o)
 
-all: libmemviewer.so mem_viewer_helper test_c test_sdl test_file test_shared binary_compare
+all: libmemviewer.so mem_viewer_helper test_c test_sdl bin_view test_shared binary_compare
 
 libmemviewer.so: $(LIB_OBJECTS) $(GUI_OBJECTS)
 	$(CXX) -shared -o $@ $(LIB_OBJECTS) $(GUI_OBJECTS) $(QT_LIBS) $(DL_LIBS)
@@ -45,7 +45,7 @@ test_c.o: test_c.c mem_viewer.h
 test_sdl.o: test_sdl.cpp mem_viewer.h
 	$(CXX) $(CXXFLAGS) $(SDL_CFLAGS) -c -o $@ $<
 
-test_file.o: test_file.cpp mem_viewer.h
+bin_view.o: bin_view.cpp mem_viewer.h
 	$(CXX) $(CXXFLAGS) -c -o $@ $<
 
 test_c: test_c.o libmemviewer.so
@@ -54,8 +54,8 @@ test_c: test_c.o libmemviewer.so
 test_sdl: test_sdl.o libmemviewer.so
 	$(CXX) -o $@ test_sdl.o -L. -lmemviewer -Wl,-rpath,'$$ORIGIN' $(SDL_LIBS)
 
-test_file: test_file.o libmemviewer.so
-	$(CXX) -o $@ test_file.o -L. -lmemviewer -Wl,-rpath,'$$ORIGIN'
+bin_view: bin_view.o libmemviewer.so
+	$(CXX) -o $@ bin_view.o -L. -lmemviewer -Wl,-rpath,'$$ORIGIN'
 
 test_shared.o: test_shared.c mem_viewer.h
 	$(CC) $(CFLAGS) -c -o $@ $<
@@ -91,6 +91,6 @@ moc_comparison_widget.cpp: comparison_widget.h
 	$(MOC) $(QT_CFLAGS) -o $@ $<
 
 clean:
-	rm -f *.o *.so mem_viewer_helper test_c test_sdl test_file test_shared binary_compare moc_*.cpp
+	rm -f *.o *.so mem_viewer_helper test_c test_sdl bin_view test_shared binary_compare moc_*.cpp
 
 .PHONY: all clean

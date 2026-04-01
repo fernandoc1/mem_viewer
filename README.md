@@ -7,7 +7,7 @@
 - `libmemviewer.so`: shared library exposing the C API in [`mem_viewer.h`](/home/fernando/Code/hl_ff6/external/LakeSnes/mem_viewer/mem_viewer.h)
 - `mem_viewer_helper`: Qt helper process used by `mem_viewer_open()`
 - `binary_compare`: side-by-side binary file comparison GUI
-- `test_c`, `test_sdl`, `test_file`, `test_shared`: local test/demo executables
+- `test_c`, `test_sdl`, `bin_view`, `test_shared`: local test/demo executables
 
 ## Features
 
@@ -53,7 +53,7 @@ This builds all targets:
 - `mem_viewer_helper`
 - `test_c`
 - `test_sdl`
-- `test_file`
+- `bin_view`
 - `test_shared`
 - `binary_compare`
 
@@ -142,10 +142,10 @@ Run the shared-memory demo:
 Open a static file in the viewer:
 
 ```bash
-./test_file path/to/file.bin [notes1.json notes2.json ...]
+./bin_view path/to/file.bin [notes1.json notes2.json ...]
 ```
 
-`test_file` loads the file into shared memory and opens the viewer in shared-memory mode, which avoids the live-process refresh overhead and is faster for large static files. Any additional arguments are passed as note files through `MEM_VIEWER_NOTES`.
+`bin_view` loads the file into shared memory and opens the viewer in shared-memory mode, which avoids the live-process refresh overhead and is faster for large static files. Any additional arguments are passed as note files through `MEM_VIEWER_NOTES`.
 
 Open the binary comparator:
 

@@ -6,6 +6,7 @@ test_file
 mem_viewer_helper
 test_shared
 binary_compare
+bin_view
 *~
 *.swp
 *.tmp
