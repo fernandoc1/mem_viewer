@@ -34,6 +34,7 @@
 #include <QSignalBlocker>
 #include <QTextEdit>
 #include <QTextBrowser>
+#include <QUrl>
 #include <QWheelEvent>
 #include <QResizeEvent>
 #include <QMainWindow>
@@ -140,24 +141,81 @@ public:
         setOpenLinks(false);
         setOpenExternalLinks(false);
         setReadOnly(true);
+        setTextInteractionFlags(Qt::TextBrowserInteraction);
+        setMouseTracking(true);
+        connect(this, &QTextBrowser::anchorClicked, this, [this](const QUrl &url) {
+            mem_viewer_debug_log(
+                "NotePreview anchorClicked ctrl=%d armed=%d url=%s",
+                ctrl_click_armed_ ? 1 : 0,
+                !pending_anchor_.isEmpty() ? 1 : 0,
+                url.toString().toLocal8Bit().constData());
+            if(ctrl_click_armed_ && onLinkActivated) {
+                onLinkActivated(url.toString());
+            }
+        });
     }
 
     std::function<void(const QString&)> onLinkActivated;
 
 protected:
-    void mouseReleaseEvent(QMouseEvent *event) override {
+    void mousePressEvent(QMouseEvent *event) override {
+        ctrl_click_armed_ = false;
+        pending_anchor_.clear();
         if(event != nullptr && event->button() == Qt::LeftButton && (event->modifiers() & Qt::ControlModifier) != 0) {
-            const QString anchor = anchorAt(event->position().toPoint());
-            if(!anchor.isEmpty()) {
-                if(onLinkActivated) {
-                    onLinkActivated(anchor);
-                }
+            pending_anchor_ = anchorAt(event->position().toPoint());
+            ctrl_click_armed_ = !pending_anchor_.isEmpty();
+            mem_viewer_debug_log(
+                "NotePreview mousePress ctrl=1 anchor=%s pos=(%.1f,%.1f)",
+                pending_anchor_.toLocal8Bit().constData(),
+                event->position().x(),
+                event->position().y());
+            if(!pending_anchor_.isEmpty()) {
                 event->accept();
                 return;
             }
+        } else if(event != nullptr) {
+            mem_viewer_debug_log(
+                "NotePreview mousePress ctrl=0 anchor=%s pos=(%.1f,%.1f)",
+                anchorAt(event->position().toPoint()).toLocal8Bit().constData(),
+                event->position().x(),
+                event->position().y());
         }
+        QTextBrowser::mousePressEvent(event);
+    }
+
+    void mouseReleaseEvent(QMouseEvent *event) override {
+        if(event != nullptr && event->button() == Qt::LeftButton && (event->modifiers() & Qt::ControlModifier) != 0) {
+            const QString anchor = anchorAt(event->position().toPoint());
+            mem_viewer_debug_log(
+                "NotePreview mouseRelease ctrl=1 anchor=%s pending=%s pos=(%.1f,%.1f)",
+                anchor.toLocal8Bit().constData(),
+                pending_anchor_.toLocal8Bit().constData(),
+                event->position().x(),
+                event->position().y());
+            if(!anchor.isEmpty() && anchor == pending_anchor_) {
+                if(onLinkActivated) {
+                    onLinkActivated(anchor);
+                }
+                pending_anchor_.clear();
+                ctrl_click_armed_ = false;
+                event->accept();
+                return;
+            }
+        } else if(event != nullptr) {
+            mem_viewer_debug_log(
+                "NotePreview mouseRelease ctrl=0 anchor=%s pos=(%.1f,%.1f)",
+                anchorAt(event->position().toPoint()).toLocal8Bit().constData(),
+                event->position().x(),
+                event->position().y());
+        }
+        pending_anchor_.clear();
+        ctrl_click_armed_ = false;
         QTextBrowser::mouseReleaseEvent(event);
     }
+
+private:
+    QString pending_anchor_;
+    bool ctrl_click_armed_ = false;
 };
 
 enum class SearchFormat {
@@ -2531,7 +2589,10 @@ private:
         const QString note = QString::fromStdString(state.active_annotation.note);
         if (state.preview != nullptr) {
             state.preview->setEnabled(!note.isEmpty());
-            state.preview->setHtml(note_text_to_html(note));
+            const QString note_html = note_text_to_html(note);
+            mem_viewer_debug_log("note preview raw=%s", note.toLocal8Bit().constData());
+            mem_viewer_debug_log("note preview html=%s", note_html.toLocal8Bit().constData());
+            state.preview->setHtml(note_html);
         }
         if (state.editor->toPlainText() != note) {
             const QSignalBlocker blocker(state.editor);
