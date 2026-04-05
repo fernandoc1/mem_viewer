@@ -1908,6 +1908,34 @@ public:
             goToPosition();
         });
 
+        QFrame *navigation_frame = new QFrame();
+        navigation_frame->setFrameStyle(QFrame::Box | QFrame::Raised);
+        QVBoxLayout *navigation_layout = new QVBoxLayout(navigation_frame);
+        navigation_layout->setContentsMargins(8, 8, 8, 8);
+        navigation_layout->setSpacing(6);
+        navigation_layout->addWidget(new QLabel("Navigation"));
+
+        QHBoxLayout *navigation_buttons = new QHBoxLayout();
+        back_button_ = new QPushButton("Back");
+        forward_button_ = new QPushButton("Forward");
+        back_button_->setEnabled(false);
+        forward_button_->setEnabled(false);
+        navigation_buttons->addWidget(back_button_);
+        navigation_buttons->addWidget(forward_button_);
+        navigation_layout->addLayout(navigation_buttons);
+
+        navigation_label_ = new QLabel("No history");
+        navigation_label_->setWordWrap(true);
+        navigation_layout->addWidget(navigation_label_);
+        inspect_layout->addWidget(navigation_frame);
+
+        connect(back_button_, &QPushButton::clicked, this, [this]() {
+            navigateHistory(-1);
+        });
+        connect(forward_button_, &QPushButton::clicked, this, [this]() {
+            navigateHistory(1);
+        });
+
         QFrame *edit_frame = new QFrame();
         edit_frame->setFrameStyle(QFrame::Box | QFrame::Raised);
         QVBoxLayout *edit_layout = new QVBoxLayout(edit_frame);
@@ -2433,6 +2461,7 @@ private:
     void onSelectionChanged(const std::vector<size_t> &selection) {
         const double start = mem_viewer_now_seconds();
         current_selection_ = selection;
+        recordNavigationSelection(selection);
 
         const size_t single_index = viewer_widget_ ? viewer_widget_->getSelectedIndex() : std::numeric_limits<size_t>::max();
         if (single_index < std::numeric_limits<size_t>::max()) {
@@ -2638,6 +2667,81 @@ private:
         return note_tabs_[static_cast<size_t>(index)].get();
     }
 
+    void recordNavigationSelection(const std::vector<size_t> &selection) {
+        if(selection.size() != 1) {
+            updateNavigationUi();
+            return;
+        }
+
+        const size_t index = selection.front();
+        if(navigation_replaying_) {
+            updateNavigationUi();
+            return;
+        }
+
+        if(!navigation_history_.empty() && navigation_history_[navigation_history_index_] == index) {
+            updateNavigationUi();
+            return;
+        }
+
+        if(navigation_history_index_ + 1 < navigation_history_.size()) {
+            navigation_history_.erase(
+                navigation_history_.begin() + static_cast<std::ptrdiff_t>(navigation_history_index_ + 1),
+                navigation_history_.end());
+        }
+
+        navigation_history_.push_back(index);
+        navigation_history_index_ = navigation_history_.empty() ? 0 : navigation_history_.size() - 1;
+        mem_viewer_debug_log("navigation record index=0x%zx size=%zu current=%zu",
+            index,
+            navigation_history_.size(),
+            navigation_history_index_);
+        updateNavigationUi();
+    }
+
+    void navigateHistory(int direction) {
+        if(viewer_widget_ == nullptr || navigation_history_.empty()) {
+            return;
+        }
+
+        const std::ptrdiff_t current = static_cast<std::ptrdiff_t>(navigation_history_index_);
+        const std::ptrdiff_t next = current + (direction < 0 ? -1 : 1);
+        if(next < 0 || next >= static_cast<std::ptrdiff_t>(navigation_history_.size())) {
+            return;
+        }
+
+        navigation_history_index_ = static_cast<size_t>(next);
+        navigation_replaying_ = true;
+        const size_t target = navigation_history_[navigation_history_index_];
+        mem_viewer_debug_log("navigation replay target=0x%zx current=%zu size=%zu",
+            target,
+            navigation_history_index_,
+            navigation_history_.size());
+        viewer_widget_->jumpToIndex(target);
+        navigation_replaying_ = false;
+        updateNavigationUi();
+    }
+
+    void updateNavigationUi() {
+        if(back_button_ != nullptr) {
+            back_button_->setEnabled(!navigation_history_.empty() && navigation_history_index_ > 0);
+        }
+        if(forward_button_ != nullptr) {
+            forward_button_->setEnabled(!navigation_history_.empty() && navigation_history_index_ + 1 < navigation_history_.size());
+        }
+        if(navigation_label_ != nullptr) {
+            if(navigation_history_.empty()) {
+                navigation_label_->setText(QStringLiteral("No history"));
+            } else {
+                navigation_label_->setText(
+                    QStringLiteral("Current: 0x%1 (%2/%3)")
+                        .arg(static_cast<qulonglong>(navigation_history_[navigation_history_index_]), 0, 16)
+                        .arg(navigation_history_index_ + 1)
+                        .arg(navigation_history_.size()));
+            }
+        }
+    }
+
     void updateStatus(size_t index = std::numeric_limits<size_t>::max(), uint8_t value = 0) {
         if (!viewer_widget_) return;
         
@@ -2687,6 +2791,9 @@ private:
     QPushButton *refresh_button_;
     QLineEdit *goto_entry_;
     QPushButton *goto_button_;
+    QPushButton *back_button_ = nullptr;
+    QPushButton *forward_button_ = nullptr;
+    QLabel *navigation_label_ = nullptr;
     QLineEdit *search_entry_;
     QComboBox *format_combo_;
     QComboBox *width_combo_;
@@ -2702,6 +2809,9 @@ private:
     QLabel *status_label_;
     std::vector<std::unique_ptr<NoteTabState>> note_tabs_;
     std::vector<size_t> current_selection_;
+    std::vector<size_t> navigation_history_;
+    size_t navigation_history_index_ = 0;
+    bool navigation_replaying_ = false;
     std::string last_search_signature_;
     bool note_files_loaded_ = false;
 };
