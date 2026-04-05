@@ -29,6 +29,7 @@
 #include <QMenu>
 #include <QMenuBar>
 #include <QMessageBox>
+#include <QSaveFile>
 #include <QMouseEvent>
 #include <QKeySequence>
 #include <QSignalBlocker>
@@ -1432,6 +1433,44 @@ public:
         return memory_size_;
     }
 
+    bool dumpMemoryToFile(const QString &path, QString *error_message) const {
+        QSaveFile output(path);
+        if (!output.open(QIODevice::WriteOnly)) {
+            if (error_message != nullptr) {
+                *error_message = QStringLiteral("Failed to open %1 for writing.").arg(path);
+            }
+            return false;
+        }
+
+        std::vector<uint8_t> chunk(std::min<size_t>(memory_size_ == 0 ? 1 : memory_size_, 1u << 20));
+        size_t offset = 0;
+        while (offset < memory_size_) {
+            const size_t span = std::min(chunk.size(), memory_size_ - offset);
+            if (!read_memory_(offset, chunk.data(), span)) {
+                if (error_message != nullptr) {
+                    *error_message = QStringLiteral("Failed to read memory at offset 0x%1.")
+                        .arg(static_cast<qulonglong>(offset), 0, 16);
+                }
+                return false;
+            }
+            if (output.write(reinterpret_cast<const char *>(chunk.data()), static_cast<qint64>(span)) != static_cast<qint64>(span)) {
+                if (error_message != nullptr) {
+                    *error_message = QStringLiteral("Failed to write %1.").arg(path);
+                }
+                return false;
+            }
+            offset += span;
+        }
+
+        if (!output.commit()) {
+            if (error_message != nullptr) {
+                *error_message = QStringLiteral("Failed to finalize %1.").arg(path);
+            }
+            return false;
+        }
+        return true;
+    }
+
     void applyEdit(uint8_t value) {
         const size_t selected_index = getSelectedIndex();
         if (selected_index >= memory_size_) {
@@ -2340,6 +2379,11 @@ private:
             selectAnnotationFile(selected_files.front());
         });
 
+        QAction *save_memory = file_menu->addAction("Save Memory As...");
+        connect(save_memory, &QAction::triggered, this, [this]() {
+            saveMemoryToFile();
+        });
+
         QMenu *edit_menu = menuBar()->addMenu("&Edit");
         QAction *copy_selection = edit_menu->addAction("Copy Selection");
         copy_selection->setShortcut(QKeySequence::Copy);
@@ -2741,6 +2785,33 @@ private:
         if (QClipboard *clipboard = QApplication::clipboard()) {
             clipboard->setText(QString::fromStdString(text));
         }
+    }
+
+    void saveMemoryToFile() {
+        if (viewer_widget_ == nullptr) {
+            return;
+        }
+
+        QFileDialog dialog(this, QStringLiteral("Save Memory Dump"));
+        dialog.setAcceptMode(QFileDialog::AcceptSave);
+        dialog.setFileMode(QFileDialog::AnyFile);
+        dialog.setNameFilter(QStringLiteral("Binary Files (*.bin);;All Files (*)"));
+        dialog.setOption(QFileDialog::DontUseNativeDialog, true);
+        if (dialog.exec() != QDialog::Accepted) {
+            return;
+        }
+
+        const QStringList selected_files = dialog.selectedFiles();
+        if (selected_files.isEmpty()) {
+            return;
+        }
+
+        QString error_message;
+        if (!viewer_widget_->dumpMemoryToFile(selected_files.front(), &error_message)) {
+            QMessageBox::warning(this, QStringLiteral("Save Memory Dump"), error_message);
+            return;
+        }
+        updateStatus();
     }
 
     void updateAnnotationColorButton(NoteTabState &state) {
