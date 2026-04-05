@@ -2244,6 +2244,20 @@ private:
             copySelectionToClipboard();
         });
         addAction(copy_selection);
+
+        QAction *previous_byte = edit_menu->addAction("Go To Previous Byte");
+        previous_byte->setShortcut(QKeySequence(Qt::Key_F3));
+        connect(previous_byte, &QAction::triggered, this, [this]() {
+            navigateSelectedByte(-1);
+        });
+        addAction(previous_byte);
+
+        QAction *next_byte = edit_menu->addAction("Go To Next Byte");
+        next_byte->setShortcut(QKeySequence(Qt::Key_F4));
+        connect(next_byte, &QAction::triggered, this, [this]() {
+            navigateSelectedByte(1);
+        });
+        addAction(next_byte);
     }
 
     void selectAnnotationFile(const QString &path) {
@@ -2425,6 +2439,31 @@ private:
             return;
         }
         viewer_widget_->jumpToIndex(index);
+    }
+
+    void navigateSelectedByte(int direction) {
+        if(viewer_widget_ == nullptr) {
+            return;
+        }
+
+        const size_t current = viewer_widget_->getSelectedIndex();
+        if(current == std::numeric_limits<size_t>::max()) {
+            return;
+        }
+
+        if(direction < 0) {
+            if(current == 0) {
+                return;
+            }
+            viewer_widget_->jumpToIndex(current - 1);
+            return;
+        }
+
+        const size_t next = current + 1;
+        if(next >= viewer_widget_->getMemorySize()) {
+            return;
+        }
+        viewer_widget_->jumpToIndex(next);
     }
 
     void navigateToNoteMatch(NoteTabState &state) {
