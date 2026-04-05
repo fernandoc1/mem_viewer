@@ -34,7 +34,6 @@
 #include <QSignalBlocker>
 #include <QTextEdit>
 #include <QTextBrowser>
-#include <QUrl>
 #include <QWheelEvent>
 #include <QResizeEvent>
 #include <QMainWindow>
@@ -143,7 +142,7 @@ public:
         setReadOnly(true);
     }
 
-    std::function<void(const QUrl&)> onLinkActivated;
+    std::function<void(const QString&)> onLinkActivated;
 
 protected:
     void mouseReleaseEvent(QMouseEvent *event) override {
@@ -151,7 +150,7 @@ protected:
             const QString anchor = anchorAt(event->position().toPoint());
             if(!anchor.isEmpty()) {
                 if(onLinkActivated) {
-                    onLinkActivated(QUrl(anchor));
+                    onLinkActivated(anchor);
                 }
                 event->accept();
                 return;
@@ -409,23 +408,24 @@ static QString note_text_to_html(const QString &note) {
 
     int position = 0;
     while(position < note.size()) {
-        const int marker_start = note.indexOf(QStringLiteral("[[jump:"), position);
+        const int marker_start = note.indexOf(QStringLiteral("[["), position);
         if(marker_start < 0) {
             html += note.mid(position).toHtmlEscaped().replace(QLatin1Char('\n'), QStringLiteral("<br/>"));
             break;
         }
 
         html += note.mid(position, marker_start - position).toHtmlEscaped().replace(QLatin1Char('\n'), QStringLiteral("<br/>"));
-        const int separator = note.indexOf(QLatin1Char('|'), marker_start + 7);
-        const int marker_end = note.indexOf(QStringLiteral("]]"), marker_start + 7);
+        const int content_start = marker_start + 2;
+        const int separator = note.indexOf(QLatin1Char('|'), content_start);
+        const int marker_end = note.indexOf(QStringLiteral("]]"), content_start);
         if(separator < 0 || marker_end < 0 || separator > marker_end) {
             html += note.mid(marker_start).toHtmlEscaped().replace(QLatin1Char('\n'), QStringLiteral("<br/>"));
             break;
         }
 
-        const QString target = note.mid(marker_start + 7, separator - (marker_start + 7)).trimmed();
+        const QString target = note.mid(content_start, separator - content_start).trimmed();
         const QString label = note.mid(separator + 1, marker_end - (separator + 1));
-        html += QStringLiteral("<a href=\"jump:%1\">%2</a>")
+        html += QStringLiteral("<a href=\"%1\">%2</a>")
             .arg(target.toHtmlEscaped(), label.toHtmlEscaped());
         position = marker_end + 2;
     }
@@ -2222,10 +2222,8 @@ private:
         connect(note_tab->editor, &QTextEdit::textChanged, this, [this, raw = note_tab.get()]() {
             onAnnotationEdited(raw);
         });
-        note_tab->preview->onLinkActivated = [this](const QUrl &url) {
-            if(url.scheme() == QStringLiteral("jump")) {
-                jumpToNoteLink(url.path().isEmpty() ? url.toString().mid(5) : url.path());
-            }
+        note_tab->preview->onLinkActivated = [this](const QString &anchor) {
+            jumpToNoteLink(anchor);
         };
         connect(note_tab->color_button, &QPushButton::clicked, this, [this, raw = note_tab.get()]() {
             chooseAnnotationColor(raw);
@@ -2322,9 +2320,14 @@ private:
             return;
         }
 
+        QString normalizedTarget = targetText.trimmed();
+        if(normalizedTarget.startsWith(QStringLiteral("jump:"))) {
+            normalizedTarget = normalizedTarget.mid(5).trimmed();
+        }
+
         size_t index = 0;
-        if(!parse_memory_position(targetText.toStdString(), viewer_widget_->getMemorySize(), index)) {
-            mem_viewer_debug_log("note link target parse failed: %s", targetText.toLocal8Bit().constData());
+        if(!parse_memory_position(normalizedTarget.toStdString(), viewer_widget_->getMemorySize(), index)) {
+            mem_viewer_debug_log("note link target parse failed: %s", normalizedTarget.toLocal8Bit().constData());
             return;
         }
         viewer_widget_->jumpToIndex(index);
