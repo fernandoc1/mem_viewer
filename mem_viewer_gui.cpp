@@ -1104,6 +1104,7 @@ public:
           read_memory_(std::move(read_memory)),
           write_memory_(std::move(write_memory)),
           open_flag_(open_flag),
+          recent_change_highlight_enabled_(!mem_viewer_static_file_mode()),
           rows_(memory_size_ == 0 ? 0 : ((memory_size_ + kBytesPerRow - 1) / kBytesPerRow)),
           last_seen_(memory_size_, 0),
           changed_at_(memory_size_, -1.0),
@@ -1190,7 +1191,9 @@ public:
             const uint8_t current = visible_cache_[i];
             if (current != last_seen_[index]) {
                 last_seen_[index] = current;
-                changed_at_[index] = now;
+                if (recent_change_highlight_enabled_) {
+                    changed_at_[index] = now;
+                }
             }
         }
 
@@ -1353,7 +1356,9 @@ public:
             return;
         }
         last_seen_[selected_index] = value;
-        changed_at_[selected_index] = mem_viewer_now_seconds();
+        if (recent_change_highlight_enabled_) {
+            changed_at_[selected_index] = mem_viewer_now_seconds();
+        }
         refreshVisibleBytes();
     }
 
@@ -1468,7 +1473,9 @@ protected:
                 const bool selected = selection_mask_[index] != 0;
                 const bool matched = match_mask_[index] != 0;
                 const double age = changed_at_[index] < 0.0 ? kFadeSeconds : (now - changed_at_[index]);
-                const double fade = std::clamp(1.0 - (age / kFadeSeconds), 0.0, 1.0);
+                const double fade = recent_change_highlight_enabled_
+                    ? std::clamp(1.0 - (age / kFadeSeconds), 0.0, 1.0)
+                    : 0.0;
                 const uint8_t value = byteForIndex(index);
 
                 if (fade > 0.0 || selected || matched) {
@@ -1725,6 +1732,7 @@ private:
     std::function<bool(size_t, void *, size_t)> read_memory_;
     std::function<bool(size_t, const void *, size_t)> write_memory_;
     std::atomic<bool> &open_flag_;
+    bool recent_change_highlight_enabled_;
 
     QTimer *timer_;
 
