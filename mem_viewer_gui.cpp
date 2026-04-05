@@ -105,6 +105,14 @@ static bool mem_viewer_static_file_mode() {
     return enabled;
 }
 
+static bool mem_viewer_notes_read_only() {
+    static const bool enabled = []() {
+        const char *value = std::getenv("MEM_VIEWER_NOTES_READ_ONLY");
+        return value != nullptr && value[0] != '\0' && std::strcmp(value, "0") != 0;
+    }();
+    return enabled;
+}
+
 static double mem_viewer_now_seconds() {
     using clock = std::chrono::steady_clock;
     const auto now = clock::now().time_since_epoch();
@@ -1820,6 +1828,7 @@ public:
         std::vector<AnnotationStore::ResolvedAnnotation> search_matches;
         int active_search_match = -1;
         QString last_search_query;
+        bool read_only = false;
     };
 
     MemViewerWindow(
@@ -2326,6 +2335,7 @@ private:
         }
 
         note_tab->current_color = kDefaultAnnotationColor;
+        note_tab->read_only = mem_viewer_notes_read_only();
 
         connect(note_tab->editor, &QTextEdit::textChanged, this, [this, raw = note_tab.get()]() {
             onAnnotationEdited(raw);
@@ -2545,6 +2555,10 @@ private:
             return;
         }
 
+        if (state->read_only) {
+            return;
+        }
+
         if(state->preview != nullptr) {
             state->preview->setHtml(note_text_to_html(state->editor->toPlainText()));
         }
@@ -2575,6 +2589,10 @@ private:
             return;
         }
 
+        if (state->read_only) {
+            return;
+        }
+
         if (current_selection_.empty()) {
             return;
         }
@@ -2593,7 +2611,7 @@ private:
     }
 
     void clearSelectedAnnotations(NoteTabState *state) {
-        if (state == nullptr || current_selection_.empty() || !state->store.hasFilePath()) {
+        if (state == nullptr || state->read_only || current_selection_.empty() || !state->store.hasFilePath()) {
             return;
         }
 
@@ -2650,13 +2668,15 @@ private:
             state.selection_label->setText(selection_text);
         }
         const QString file_text = state.store.hasFilePath()
-            ? QStringLiteral("Annotation file: %1").arg(state.store.filePath())
+            ? QStringLiteral("Annotation file: %1%2").arg(
+                state.store.filePath(),
+                state.read_only ? QStringLiteral(" (read-only)") : QString())
             : QStringLiteral("Annotation file: not selected");
         if (state.file_label->text() != file_text) {
             state.file_label->setText(file_text);
         }
 
-        const bool can_edit = !current_selection_.empty();
+        const bool can_edit = !state.read_only && !current_selection_.empty();
         state.editor->setEnabled(can_edit);
         state.color_button->setEnabled(can_edit);
         state.clear_button->setEnabled(can_edit && state.store.hasFilePath());
@@ -2810,7 +2830,7 @@ private:
                 ss << " | Selected: " << current_selection_.size();
             }
             if (!note_tabs_.empty()) {
-                ss << " | Notes: autosaved";
+                ss << " | Notes: " << (mem_viewer_notes_read_only() ? "read-only" : "autosaved");
             } else if (!current_selection_.empty()) {
                 ss << " | Load a notes file in File menu";
             }
