@@ -2,6 +2,35 @@
 #include <fstream>
 #include <algorithm>
 #include <sstream>
+#include <cstdarg>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+
+namespace {
+
+bool binary_compare_debug_enabled() {
+    static const bool enabled = []() {
+        const char *value = std::getenv("BINARY_COMPARE_DEBUG");
+        return value != nullptr && value[0] != '\0' && std::strcmp(value, "0") != 0;
+    }();
+    return enabled;
+}
+
+void binary_compare_debug_log(const char *fmt, ...) {
+    if (!binary_compare_debug_enabled()) {
+        return;
+    }
+    std::fprintf(stderr, "[binary_compare] ");
+    va_list args;
+    va_start(args, fmt);
+    std::vfprintf(stderr, fmt, args);
+    va_end(args);
+    std::fprintf(stderr, "\n");
+    std::fflush(stderr);
+}
+
+}  // namespace
 
 DualFileBuffer::~DualFileBuffer() {
     buffer1_.reset();
@@ -9,6 +38,7 @@ DualFileBuffer::~DualFileBuffer() {
 }
 
 bool DualFileBuffer::loadFiles(const std::string& file1_path, const std::string& file2_path, std::string& error_msg) {
+    binary_compare_debug_log("loadFiles begin file1=%s file2=%s", file1_path.c_str(), file2_path.c_str());
     // Open file 1
     std::ifstream file1(file1_path, std::ios::binary | std::ios::ate);
     if (!file1.is_open()) {
@@ -68,9 +98,11 @@ bool DualFileBuffer::loadFiles(const std::string& file1_path, const std::string&
 
     size1_ = size1;
     size2_ = size2;
+    binary_compare_debug_log("loadFiles read complete size1=%zu size2=%zu", size1_, size2_);
 
     // Analyze differences
     analyzeDifferences();
+    binary_compare_debug_log("loadFiles diff analysis complete diff_count=%zu", diff_positions_.size());
 
     return true;
 }
@@ -79,6 +111,7 @@ void DualFileBuffer::analyzeDifferences() {
     diff_positions_.clear();
 
     size_t max_size = std::max(size1_, size2_);
+    binary_compare_debug_log("analyzeDifferences begin max_size=%zu", max_size);
 
     for (size_t i = 0; i < max_size; ++i) {
         uint8_t b1 = (i < size1_) ? buffer1_[i] : 0;
@@ -93,7 +126,11 @@ void DualFileBuffer::analyzeDifferences() {
         if (differs) {
             diff_positions_.push_back(i);
         }
+        if ((i + 1) % (1024 * 1024) == 0) {
+            binary_compare_debug_log("analyzeDifferences progress processed=%zu diff_count=%zu", i + 1, diff_positions_.size());
+        }
     }
+    binary_compare_debug_log("analyzeDifferences done diff_count=%zu", diff_positions_.size());
 }
 
 bool DualFileBuffer::isDifferentAt(size_t position) const {

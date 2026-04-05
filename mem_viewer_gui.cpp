@@ -133,12 +133,14 @@ static const QColor kDefaultAnnotationColor(0x72, 0xE6, 0x7A);
 
 struct AnnotationEntry {
     std::vector<size_t> positions;
+    std::vector<std::pair<size_t, size_t>> ranges;
     std::string note;
     QColor color = kDefaultAnnotationColor;
 };
 
-struct AnnotationColorPoint {
-    size_t position = 0;
+struct AnnotationSpan {
+    size_t start = 0;
+    size_t end = 0;
     QRgb color = 0U;
 };
 
@@ -440,6 +442,25 @@ static bool annotation_position_from_json(const QJsonValue &value, size_t *posit
     return false;
 }
 
+static bool annotation_range_from_json(const QJsonValue &value, std::pair<size_t, size_t> *range) {
+    if (range == nullptr || !value.isObject()) {
+        return false;
+    }
+
+    const QJsonObject object = value.toObject();
+    size_t start = 0;
+    size_t end = 0;
+    if (!annotation_position_from_json(object.value(QStringLiteral("start")), &start) ||
+        !annotation_position_from_json(object.value(QStringLiteral("end")), &end)) {
+        return false;
+    }
+    if (end < start) {
+        std::swap(start, end);
+    }
+    *range = {start, end};
+    return true;
+}
+
 static QString annotation_position_to_json(size_t position) {
     return QStringLiteral("0x%1").arg(static_cast<qulonglong>(position), 0, 16);
 }
@@ -503,11 +524,12 @@ class AnnotationStore {
 public:
     struct ResolvedAnnotation {
         std::vector<size_t> positions;
+        std::vector<std::pair<size_t, size_t>> ranges;
         std::string note;
         QColor color = kDefaultAnnotationColor;
 
         bool isValid() const {
-            return !positions.empty();
+            return !positions.empty() || !ranges.empty() || !note.empty();
         }
     };
 
@@ -574,14 +596,30 @@ public:
                 }
                 unique_positions.push_back(position);
             }
-            if (unique_positions.empty()) {
+            const QJsonArray ranges_array = entry_object.value(QStringLiteral("ranges")).toArray();
+            std::vector<std::pair<size_t, size_t>> ranges;
+            ranges.reserve(static_cast<size_t>(ranges_array.size()));
+            for (const QJsonValue &range_value : ranges_array) {
+                std::pair<size_t, size_t> range = {};
+                if (annotation_range_from_json(range_value, &range)) {
+                    ranges.push_back(range);
+                }
+            }
+            if (unique_positions.empty() && ranges.empty()) {
                 continue;
             }
             std::sort(unique_positions.begin(), unique_positions.end());
             unique_positions.erase(std::unique(unique_positions.begin(), unique_positions.end()), unique_positions.end());
+            std::sort(ranges.begin(), ranges.end(), [](const auto &lhs, const auto &rhs) {
+                if (lhs.first != rhs.first) {
+                    return lhs.first < rhs.first;
+                }
+                return lhs.second < rhs.second;
+            });
 
             AnnotationEntry entry;
             entry.positions = std::move(unique_positions);
+            entry.ranges = std::move(ranges);
             entry.note = entry_object.value(QStringLiteral("note")).toString().toStdString();
             entry.color = annotation_color_from_json(entry_object.value(QStringLiteral("color")));
             annotations_.push_back(std::move(entry));
@@ -613,10 +651,14 @@ public:
                 best_match = &entry;
                 return true;
             }
-            if (!containsAllPositions(entry.positions, positions)) {
+            if (!containsAllPositions(entry, positions)) {
                 return false;
             }
-            if (best_match == nullptr || entry.positions.size() < best_match->positions.size()) {
+            const size_t entry_span_count = entry.positions.size() + entry.ranges.size();
+            const size_t best_span_count = best_match == nullptr
+                ? std::numeric_limits<size_t>::max()
+                : (best_match->positions.size() + best_match->ranges.size());
+            if (best_match == nullptr || entry_span_count < best_span_count) {
                 best_match = &entry;
             }
             return false;
@@ -633,7 +675,7 @@ public:
                         positions.size(),
                         candidates_it->second.size(),
                         mem_viewer_now_seconds() - start);
-                    return {best_match->positions, best_match->note, best_match->color};
+                    return {best_match->positions, best_match->ranges, best_match->note, best_match->color};
                 }
             }
         }
@@ -644,7 +686,7 @@ public:
                     positions.size(),
                     annotations_.size(),
                     mem_viewer_now_seconds() - start);
-                return {best_match->positions, best_match->note, best_match->color};
+                return {best_match->positions, best_match->ranges, best_match->note, best_match->color};
             }
         }
 
@@ -657,7 +699,7 @@ public:
         mem_viewer_debug_log("resolveForSelection positions=%zu elapsed=%.6f s",
             positions.size(),
             mem_viewer_now_seconds() - start);
-        return {best_match->positions, best_match->note, best_match->color};
+        return {best_match->positions, best_match->ranges, best_match->note, best_match->color};
     }
 
     bool setAnnotation(const std::vector<size_t> &positions, const std::string &note, const QColor &color, QString *error_message = nullptr) {
@@ -691,7 +733,7 @@ public:
         return save(error_message);
     }
 
-    const std::vector<AnnotationColorPoint> &annotatedPositions() const {
+    const std::vector<AnnotationSpan> &annotatedSpans() const {
         rebuildAnnotationPointsIfNeeded();
         return annotation_points_;
     }
@@ -705,7 +747,7 @@ public:
         const QString needle = query.toCaseFolded();
         for(const AnnotationEntry &entry : annotations_) {
             if(QString::fromStdString(entry.note).toCaseFolded().contains(needle)) {
-                matches.push_back({entry.positions, entry.note, entry.color});
+                matches.push_back({entry.positions, entry.ranges, entry.note, entry.color});
             }
         }
         return matches;
@@ -732,6 +774,33 @@ private:
             if (haystack_index >= haystack.size() || haystack[haystack_index] != position) {
                 return false;
             }
+        }
+        return true;
+    }
+
+    static bool containsAllPositions(const AnnotationEntry &entry, const std::vector<size_t> &needle) {
+        if (needle.empty()) {
+            return false;
+        }
+
+        size_t haystack_index = 0;
+        size_t range_index = 0;
+        for (size_t position : needle) {
+            while (haystack_index < entry.positions.size() && entry.positions[haystack_index] < position) {
+                ++haystack_index;
+            }
+            if (haystack_index < entry.positions.size() && entry.positions[haystack_index] == position) {
+                continue;
+            }
+            while (range_index < entry.ranges.size() && entry.ranges[range_index].second < position) {
+                ++range_index;
+            }
+            if (range_index < entry.ranges.size() &&
+                entry.ranges[range_index].first <= position &&
+                position <= entry.ranges[range_index].second) {
+                continue;
+            }
+            return false;
         }
         return true;
     }
@@ -778,33 +847,30 @@ private:
 
         size_t total_positions = 0;
         for (const AnnotationEntry &entry : annotations_) {
-            total_positions += entry.positions.size();
+            total_positions += entry.positions.size() + entry.ranges.size();
         }
 
-        std::vector<AnnotationColorPoint> points;
+        std::vector<AnnotationSpan> points;
         points.reserve(total_positions);
         for (const AnnotationEntry &entry : annotations_) {
             const QRgb color = entry.color.isValid() ? entry.color.rgba() : kDefaultAnnotationColor.rgba();
             for (size_t position : entry.positions) {
-                points.push_back({position, color});
+                points.push_back({position, position, color});
+            }
+            for (const auto &range : entry.ranges) {
+                points.push_back({range.first, range.second, color});
             }
         }
 
-        std::sort(points.begin(), points.end(), [](const AnnotationColorPoint &lhs, const AnnotationColorPoint &rhs) {
-            if (lhs.position != rhs.position) {
-                return lhs.position < rhs.position;
+        std::sort(points.begin(), points.end(), [](const AnnotationSpan &lhs, const AnnotationSpan &rhs) {
+            if (lhs.start != rhs.start) {
+                return lhs.start < rhs.start;
+            }
+            if (lhs.end != rhs.end) {
+                return lhs.end < rhs.end;
             }
             return lhs.color < rhs.color;
         });
-
-        size_t write_index = 0;
-        for (size_t read_index = 0; read_index < points.size(); ++read_index) {
-            while (read_index + 1 < points.size() && points[read_index + 1].position == points[read_index].position) {
-                ++read_index;
-            }
-            points[write_index++] = points[read_index];
-        }
-        points.resize(write_index);
 
         annotation_points_ = std::move(points);
         annotation_points_dirty_ = false;
@@ -857,6 +923,16 @@ private:
                 positions.append(annotation_position_to_json(position));
             }
             object.insert(QStringLiteral("positions"), positions);
+            if (!entry.ranges.empty()) {
+                QJsonArray ranges;
+                for (const auto &range : entry.ranges) {
+                    QJsonObject range_object;
+                    range_object.insert(QStringLiteral("start"), annotation_position_to_json(range.first));
+                    range_object.insert(QStringLiteral("end"), annotation_position_to_json(range.second));
+                    ranges.append(range_object);
+                }
+                object.insert(QStringLiteral("ranges"), ranges);
+            }
             object.insert(QStringLiteral("note"), QString::fromStdString(entry.note));
             object.insert(QStringLiteral("color"), annotation_color_to_json(entry.color));
             annotation_array.append(object);
@@ -879,7 +955,7 @@ private:
 
     QString file_path_;
     std::vector<AnnotationEntry> annotations_;
-    mutable std::vector<AnnotationColorPoint> annotation_points_;
+    mutable std::vector<AnnotationSpan> annotation_points_;
     mutable bool annotation_points_dirty_ = true;
     mutable std::unordered_map<size_t, std::vector<size_t>> position_to_annotation_indices_;
     mutable bool annotation_lookup_dirty_ = true;
@@ -899,7 +975,7 @@ public:
         update();
     }
 
-    void setAnnotatedPositions(const std::vector<AnnotationColorPoint> &positions) {
+    void setAnnotatedPositions(const std::vector<AnnotationSpan> &positions) {
         annotated_positions_ = positions;
         update();
     }
@@ -943,21 +1019,19 @@ protected:
         painter.setBrush(kDefaultAnnotationColor);
 
         int previous_y = std::numeric_limits<int>::min();
-        for (const AnnotationColorPoint &point : annotated_positions_) {
-            const size_t row = point.position / kBytesPerRow;
-            const double ratio = row_count_ <= 1
-                ? 0.0
-                : static_cast<double>(row) / static_cast<double>(row_count_ - 1);
-            int y = groove.top() + static_cast<int>(std::floor(ratio * static_cast<double>(groove.height() - 1)));
-            y = std::clamp(y, groove.top(), groove.bottom());
-            if (y == previous_y) {
+        for (const AnnotationSpan &point : annotated_positions_) {
+            const size_t start_row = point.start / kBytesPerRow;
+            const size_t end_row = point.end / kBytesPerRow;
+            const int start_y = markerYForRow(groove, start_row);
+            const int end_y = markerYForRow(groove, end_row);
+            if (start_y == previous_y && end_y == previous_y) {
                 continue;
             }
-            previous_y = y;
+            previous_y = end_y;
             QColor marker_color = QColor::fromRgba(point.color);
             marker_color.setAlpha(220);
             painter.setBrush(marker_color);
-            painter.drawRect(QRect(groove.left() + 1, y, std::max(2, groove.width() - 2), 2));
+            painter.drawRect(QRect(groove.left() + 1, start_y, std::max(2, groove.width() - 2), std::max(2, end_y - start_y + 1)));
         }
     }
 
@@ -976,14 +1050,16 @@ private:
         int previous_y = std::numeric_limits<int>::min();
         size_t best_row = 0;
         int best_distance = std::numeric_limits<int>::max();
-        for (const AnnotationColorPoint &annotation : annotated_positions_) {
-            const size_t row = annotation.position / kBytesPerRow;
-            const int marker_y = markerYForRow(groove, row);
-            if (marker_y == previous_y) {
+        for (const AnnotationSpan &annotation : annotated_positions_) {
+            const size_t row = annotation.start / kBytesPerRow;
+            const int marker_start_y = markerYForRow(groove, annotation.start / kBytesPerRow);
+            const int marker_end_y = markerYForRow(groove, annotation.end / kBytesPerRow);
+            if (marker_start_y == previous_y && marker_end_y == previous_y) {
                 continue;
             }
-            previous_y = marker_y;
-            const int distance = std::min(std::abs(click_y - marker_y), std::abs(click_y - (marker_y + 1)));
+            previous_y = marker_end_y;
+            const int distance = click_y < marker_start_y ? (marker_start_y - click_y)
+                : (click_y > marker_end_y ? (click_y - marker_end_y) : 0);
             if (distance < best_distance) {
                 best_distance = distance;
                 best_row = row;
@@ -1003,7 +1079,7 @@ private:
 
     size_t memory_size_ = 0;
     size_t row_count_ = 0;
-    std::vector<AnnotationColorPoint> annotated_positions_;
+    std::vector<AnnotationSpan> annotated_positions_;
 };
 
 class RemoteMemory {
@@ -1419,7 +1495,7 @@ public:
         return ss.str();
     }
 
-    void setAnnotatedPositions(const std::vector<AnnotationColorPoint> &positions) {
+    void setAnnotatedPositions(const std::vector<AnnotationSpan> &positions) {
         annotation_points_ = positions;
         update();
     }
@@ -1448,8 +1524,8 @@ protected:
             annotation_points_.begin(),
             annotation_points_.end(),
             first_row * kBytesPerRow,
-            [](const AnnotationColorPoint &point, size_t position) {
-                return point.position < position;
+            [](const AnnotationSpan &point, size_t position) {
+                return point.end < position;
             });
 
         for (size_t row = first_row; row < last_row; ++row) {
@@ -1470,10 +1546,11 @@ protected:
                     break;
                 }
 
-                while (annotation_it != annotation_points_.end() && annotation_it->position < index) {
+                while (annotation_it != annotation_points_.end() && annotation_it->end < index) {
                     ++annotation_it;
                 }
-                const bool annotated = annotation_it != annotation_points_.end() && annotation_it->position == index;
+                const bool annotated = annotation_it != annotation_points_.end() &&
+                    annotation_it->start <= index && index <= annotation_it->end;
                 const QColor annotation_color = annotated ? QColor::fromRgba(annotation_it->color) : kDefaultAnnotationColor;
 
                 const double cell_x = hex_start_x_ + static_cast<double>(col * 3) * hex_cell_width_;
@@ -1748,7 +1825,7 @@ private:
     std::vector<uint8_t> last_seen_;
     std::vector<double> changed_at_;
     std::vector<uint8_t> match_mask_;
-    std::vector<AnnotationColorPoint> annotation_points_;
+    std::vector<AnnotationSpan> annotation_points_;
     std::vector<uint8_t> selection_mask_;
     std::vector<size_t> matches_;
     std::vector<uint8_t> visible_cache_;
@@ -1818,7 +1895,6 @@ public:
         QWidget *page = nullptr;
         QLabel *selection_label = nullptr;
         QLabel *file_label = nullptr;
-        NotePreview *preview = nullptr;
         QTextEdit *editor = nullptr;
         QPushButton *color_button = nullptr;
         QPushButton *clear_button = nullptr;
@@ -1931,6 +2007,22 @@ public:
         navigation_label_ = new QLabel("No history");
         navigation_label_->setWordWrap(true);
         navigation_layout->addWidget(navigation_label_);
+
+        QFrame *link_preview_frame = new QFrame();
+        link_preview_frame->setFrameStyle(QFrame::Box | QFrame::Raised);
+        QVBoxLayout *link_preview_layout = new QVBoxLayout(link_preview_frame);
+        link_preview_layout->setContentsMargins(8, 8, 8, 8);
+        link_preview_layout->setSpacing(6);
+        link_preview_layout->addWidget(new QLabel("Links"));
+        shared_note_preview_ = new NotePreview();
+        shared_note_preview_->setPlaceholderText("Ctrl+click a rendered link to jump to its target");
+        shared_note_preview_->setMinimumHeight(72);
+        shared_note_preview_->setEnabled(false);
+        shared_note_preview_->onLinkActivated = [this](const QString &anchor) {
+            jumpToNoteLink(anchor);
+        };
+        link_preview_layout->addWidget(shared_note_preview_);
+        inspect_layout->addWidget(link_preview_frame);
 
         connect(back_button_, &QPushButton::clicked, this, [this]() {
             navigateHistory(-1);
@@ -2299,12 +2391,6 @@ private:
         note_tab->file_label->setWordWrap(true);
         annotation_layout->addWidget(note_tab->file_label);
 
-        note_tab->preview = new NotePreview();
-        note_tab->preview->setPlaceholderText("Ctrl+click a rendered link to jump to its target");
-        note_tab->preview->setMinimumHeight(72);
-        note_tab->preview->setEnabled(false);
-        annotation_layout->addWidget(note_tab->preview);
-
         note_tab->editor = new QTextEdit();
         note_tab->editor->setPlaceholderText("Select one or more bytes and type notes here");
         note_tab->editor->setEnabled(false);
@@ -2333,9 +2419,6 @@ private:
         connect(note_tab->editor, &QTextEdit::textChanged, this, [this, raw = note_tab.get()]() {
             onAnnotationEdited(raw);
         });
-        note_tab->preview->onLinkActivated = [this](const QString &anchor) {
-            jumpToNoteLink(anchor);
-        };
         connect(note_tab->color_button, &QPushButton::clicked, this, [this, raw = note_tab.get()]() {
             chooseAnnotationColor(raw);
         });
@@ -2539,6 +2622,9 @@ private:
 
         if (NoteTabState *state = currentNoteTabState()) {
             updateAnnotationUiForTab(*state);
+        } else if(shared_note_preview_ != nullptr) {
+            shared_note_preview_->setEnabled(false);
+            shared_note_preview_->setHtml(note_text_to_html(QString()));
         }
         updateNotesSearchUi();
     }
@@ -2552,8 +2638,8 @@ private:
             return;
         }
 
-        if(state->preview != nullptr) {
-            state->preview->setHtml(note_text_to_html(state->editor->toPlainText()));
+        if(shared_note_preview_ != nullptr && state == currentNoteTabState()) {
+            shared_note_preview_->setHtml(note_text_to_html(state->editor->toPlainText()));
         }
 
         if (current_selection_.empty()) {
@@ -2621,9 +2707,9 @@ private:
     }
 
     void refreshAnnotationHighlights() {
-        std::vector<AnnotationColorPoint> annotated_positions;
+        std::vector<AnnotationSpan> annotated_positions;
         if (NoteTabState *state = currentNoteTabState()) {
-            annotated_positions = state->store.annotatedPositions();
+            annotated_positions = state->store.annotatedSpans();
         }
         if (viewer_widget_) {
             viewer_widget_->setAnnotatedPositions(annotated_positions);
@@ -2676,12 +2762,12 @@ private:
 
         state.active_annotation = state.store.resolveForSelection(current_selection_);
         const QString note = QString::fromStdString(state.active_annotation.note);
-        if (state.preview != nullptr) {
-            state.preview->setEnabled(!note.isEmpty());
+        if (shared_note_preview_ != nullptr && &state == currentNoteTabState()) {
+            shared_note_preview_->setEnabled(!note.isEmpty());
             const QString note_html = note_text_to_html(note);
             mem_viewer_debug_log("note preview raw=%s", note.toLocal8Bit().constData());
             mem_viewer_debug_log("note preview html=%s", note_html.toLocal8Bit().constData());
-            state.preview->setHtml(note_html);
+            shared_note_preview_->setHtml(note_html);
         }
         if (state.editor->toPlainText() != note) {
             const QSignalBlocker blocker(state.editor);
@@ -2866,6 +2952,7 @@ private:
     QPushButton *notes_prev_button_;
     QPushButton *notes_next_button_;
     QTabWidget *notes_file_tabs_;
+    NotePreview *shared_note_preview_ = nullptr;
     QLabel *status_label_;
     std::vector<std::unique_ptr<NoteTabState>> note_tabs_;
     std::vector<size_t> current_selection_;
