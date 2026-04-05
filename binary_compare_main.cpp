@@ -183,16 +183,26 @@ int main(int argc, char *argv[]) {
         dual_buffer.getSize2(),
         dual_buffer.getDiffCount());
 
-    SharedFileBuffer shared_buffer;
-    if (!copy_bytes_into_shared_buffer(dual_buffer.getBuffer1(), dual_buffer.getSize1(), shared_buffer, error)) {
+    SharedFileBuffer left_buffer;
+    if (!copy_bytes_into_shared_buffer(dual_buffer.getBuffer1(), dual_buffer.getSize1(), left_buffer, error)) {
         std::cerr << error << "\n";
         return 1;
     }
-    binary_compare_debug_log("main copied first file into shared buffer size=%zu", shared_buffer.size);
+    SharedFileBuffer right_buffer;
+    if (!copy_bytes_into_shared_buffer(dual_buffer.getBuffer2(), dual_buffer.getSize2(), right_buffer, error)) {
+        free_shared_file_buffer(left_buffer);
+        std::cerr << error << "\n";
+        return 1;
+    }
+    binary_compare_debug_log(
+        "main copied files into shared buffers left_size=%zu right_size=%zu",
+        left_buffer.size,
+        right_buffer.size);
 
     std::string diff_notes_path;
     if (!create_temp_diff_notes(dual_buffer, argv[1], argv[2], diff_notes_path, error)) {
-        free_shared_file_buffer(shared_buffer);
+        free_shared_file_buffer(left_buffer);
+        free_shared_file_buffer(right_buffer);
         std::cerr << error << "\n";
         return 1;
     }
@@ -204,9 +214,21 @@ int main(int argc, char *argv[]) {
         note_paths.emplace_back(argv[i]);
     }
 
-    const int rc = run_shared_file_viewer(shared_buffer, note_paths, error);
+    const std::string left_title =
+        "Binary Compare: " + std::filesystem::path(argv[1]).filename().string();
+    const std::string right_title =
+        "Binary Compare: " + std::filesystem::path(argv[2]).filename().string();
+    const int rc = run_dual_shared_file_viewer(
+        left_buffer,
+        right_buffer,
+        note_paths,
+        left_title,
+        right_title,
+        true,
+        error);
     binary_compare_debug_log("main viewer returned rc=%d", rc);
-    free_shared_file_buffer(shared_buffer);
+    free_shared_file_buffer(left_buffer);
+    free_shared_file_buffer(right_buffer);
     std::remove(diff_notes_path.c_str());
     if (rc != 0 && !error.empty()) {
         std::cerr << error << "\n";

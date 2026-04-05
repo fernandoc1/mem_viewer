@@ -172,6 +172,41 @@ extern "C" MemViewer *mem_viewer_open_shared(void *memory, size_t size) {
     return viewer;
 }
 
+extern "C" MemViewer *mem_viewer_open_shared_dual(void *memory1, size_t size1, void *memory2, size_t size2) {
+    if (memory1 == nullptr || size1 == 0 || memory2 == nullptr || size2 == 0) {
+        mem_viewer_debug_log(
+            "mem_viewer_open_shared_dual rejected memory1=%p size1=%zu memory2=%p size2=%zu",
+            memory1,
+            size1,
+            memory2,
+            size2);
+        return nullptr;
+    }
+
+    mem_viewer_debug_log(
+        "mem_viewer_open_shared_dual memory1=%p size1=%zu memory2=%p size2=%zu",
+        memory1,
+        size1,
+        memory2,
+        size2);
+    const pid_t child = fork();
+    if (child < 0) {
+        mem_viewer_debug_log("fork failed in mem_viewer_open_shared_dual: %s", std::strerror(errno));
+        return nullptr;
+    }
+
+    if (child == 0) {
+        mem_viewer_debug_log("shared dual child entering GUI directly");
+        const int status = mem_viewer_run_gui_shared_dual(memory1, size1, memory2, size2);
+        _exit(status == 0 ? 0 : 1);
+    }
+
+    mem_viewer_debug_log("spawned shared dual child_pid=%ld", static_cast<long>(child));
+    auto *viewer = new MemViewer;
+    viewer->process = new MemViewerProcess(child);
+    return viewer;
+}
+
 extern "C" void mem_viewer_destroy(MemViewer *viewer) {
     if (viewer == nullptr || viewer->process == nullptr) {
         return;

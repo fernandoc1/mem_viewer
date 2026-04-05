@@ -38,6 +38,7 @@
 #include <QWheelEvent>
 #include <QResizeEvent>
 #include <QMainWindow>
+#include <QScreen>
 
 #include <algorithm>
 #include <atomic>
@@ -2264,6 +2265,14 @@ public:
         open_flag_.store(false, std::memory_order_relaxed);
     }
 
+    QScrollBar *verticalScrollBar() const {
+        return scroll_area_ == nullptr ? nullptr : scroll_area_->verticalScrollBar();
+    }
+
+    void setViewerTitle(const QString &title) {
+        setWindowTitle(title);
+    }
+
     void loadDeferredNoteFiles() {
         if (note_files_loaded_) {
             return;
@@ -3025,5 +3034,102 @@ int mem_viewer_run_gui_shared(void *memory_ptr, size_t size) {
 
     const int rc = app.exec();
     mem_viewer_debug_log("shared QApplication::exec() returned rc=%d", rc);
+    return rc;
+}
+
+int mem_viewer_run_gui_shared_dual(void *memory1_ptr, size_t size1, void *memory2_ptr, size_t size2) {
+    mem_viewer_debug_log(
+        "starting shared dual Qt GUI memory1=%p size1=%zu memory2=%p size2=%zu",
+        memory1_ptr,
+        size1,
+        memory2_ptr,
+        size2);
+
+    LocalMemory memory1(memory1_ptr, size1);
+    LocalMemory memory2(memory2_ptr, size2);
+
+    int argc = 1;
+    const char *argv[] = {"mem_viewer_shared_dual", nullptr};
+    QApplication app(argc, const_cast<char **>(argv));
+
+    std::atomic<bool> left_open_flag{false};
+    std::atomic<bool> right_open_flag{false};
+
+    auto *left_window = new MemViewerWindow(
+        memory1.size(),
+        [&memory1](size_t offset, void *buffer, size_t length) { return memory1.read(offset, buffer, length); },
+        [&memory1](size_t offset, const void *buffer, size_t length) { return memory1.write(offset, buffer, length); },
+        left_open_flag);
+    auto *right_window = new MemViewerWindow(
+        memory2.size(),
+        [&memory2](size_t offset, void *buffer, size_t length) { return memory2.read(offset, buffer, length); },
+        [&memory2](size_t offset, const void *buffer, size_t length) { return memory2.write(offset, buffer, length); },
+        right_open_flag);
+
+    left_open_flag.store(true, std::memory_order_relaxed);
+    right_open_flag.store(true, std::memory_order_relaxed);
+
+    const QString left_title = QString::fromLocal8Bit(std::getenv("MEM_VIEWER_LEFT_TITLE") != nullptr
+        ? std::getenv("MEM_VIEWER_LEFT_TITLE")
+        : "Memory Viewer (Left)");
+    const QString right_title = QString::fromLocal8Bit(std::getenv("MEM_VIEWER_RIGHT_TITLE") != nullptr
+        ? std::getenv("MEM_VIEWER_RIGHT_TITLE")
+        : "Memory Viewer (Right)");
+    left_window->setViewerTitle(left_title);
+    right_window->setViewerTitle(right_title);
+
+    if (QScreen *screen = app.primaryScreen()) {
+        const QRect available = screen->availableGeometry();
+        const int gap = 12;
+        const int width = std::max(640, (available.width() - gap) / 2);
+        const int height = std::max(480, available.height());
+        left_window->setGeometry(available.x(), available.y(), width, height);
+        right_window->setGeometry(available.x() + width + gap, available.y(), width, height);
+    }
+
+    bool syncing_scroll = false;
+    auto sync_scrollbars = [&syncing_scroll](QScrollBar *source, QScrollBar *target, int value) {
+        if (syncing_scroll || source == nullptr || target == nullptr) {
+            return;
+        }
+        syncing_scroll = true;
+        const int source_min = source->minimum();
+        const int source_max = source->maximum();
+        const int target_min = target->minimum();
+        const int target_max = target->maximum();
+        if (source_max <= source_min || target_max <= target_min) {
+            target->setValue(target_min);
+        } else {
+            const double ratio =
+                static_cast<double>(value - source_min) /
+                static_cast<double>(source_max - source_min);
+            const int target_value = target_min + static_cast<int>(std::llround(
+                ratio * static_cast<double>(target_max - target_min)));
+            target->setValue(std::clamp(target_value, target_min, target_max));
+        }
+        syncing_scroll = false;
+    };
+
+    if (QScrollBar *left_scroll = left_window->verticalScrollBar()) {
+        if (QScrollBar *right_scroll = right_window->verticalScrollBar()) {
+            QObject::connect(left_scroll, &QScrollBar::valueChanged, left_window, [left_scroll, right_scroll, &sync_scrollbars](int value) {
+                sync_scrollbars(left_scroll, right_scroll, value);
+            });
+            QObject::connect(right_scroll, &QScrollBar::valueChanged, right_window, [left_scroll, right_scroll, &sync_scrollbars](int value) {
+                sync_scrollbars(right_scroll, left_scroll, value);
+            });
+        }
+    }
+
+    left_window->show();
+    right_window->show();
+    if (mem_viewer_static_file_mode()) {
+        QTimer::singleShot(50, left_window, [left_window]() { left_window->loadDeferredNoteFiles(); });
+        QTimer::singleShot(50, right_window, [right_window]() { right_window->loadDeferredNoteFiles(); });
+    }
+    mem_viewer_debug_log("shared dual windows shown");
+
+    const int rc = app.exec();
+    mem_viewer_debug_log("shared dual QApplication::exec() returned rc=%d", rc);
     return rc;
 }

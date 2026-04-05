@@ -158,3 +158,59 @@ int run_shared_file_viewer(const SharedFileBuffer &buffer, const std::vector<std
     shared_file_viewer_debug_log("run_shared_file_viewer viewer closed");
     return 0;
 }
+
+int run_dual_shared_file_viewer(
+    const SharedFileBuffer &left_buffer,
+    const SharedFileBuffer &right_buffer,
+    const std::vector<std::string> &note_paths,
+    const std::string &left_title,
+    const std::string &right_title,
+    bool notes_read_only,
+    std::string &error) {
+    if (left_buffer.data == nullptr || left_buffer.size == 0 ||
+        right_buffer.data == nullptr || right_buffer.size == 0) {
+        error = "shared buffer is empty";
+        return 1;
+    }
+
+    shared_file_viewer_debug_log(
+        "run_dual_shared_file_viewer begin left_size=%zu right_size=%zu note_files=%zu read_only=%d",
+        left_buffer.size,
+        right_buffer.size,
+        note_paths.size(),
+        notes_read_only ? 1 : 0);
+
+    if (!note_paths.empty()) {
+        const std::string joined = join_note_paths(note_paths);
+        shared_file_viewer_debug_log("run_dual_shared_file_viewer MEM_VIEWER_NOTES length=%zu", joined.size());
+        if (!set_env_or_error("MEM_VIEWER_NOTES", joined.c_str(), error)) {
+            return 1;
+        }
+    }
+    if (!set_env_or_error("MEM_VIEWER_DISABLE_AUTO_REFRESH", "1", error) ||
+        !set_env_or_error("MEM_VIEWER_STATIC_FILE", "1", error) ||
+        !set_env_or_error("MEM_VIEWER_LEFT_TITLE", left_title.c_str(), error) ||
+        !set_env_or_error("MEM_VIEWER_RIGHT_TITLE", right_title.c_str(), error) ||
+        !set_env_or_error("MEM_VIEWER_NOTES_READ_ONLY", notes_read_only ? "1" : "0", error)) {
+        return 1;
+    }
+
+    MemViewer *viewer = mem_viewer_open_shared_dual(
+        left_buffer.data,
+        left_buffer.size,
+        right_buffer.data,
+        right_buffer.size);
+    if (viewer == nullptr) {
+        error = "mem_viewer_open_shared_dual failed";
+        return 1;
+    }
+    shared_file_viewer_debug_log("run_dual_shared_file_viewer viewer opened");
+
+    while (mem_viewer_is_open(viewer)) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+
+    mem_viewer_destroy(viewer);
+    shared_file_viewer_debug_log("run_dual_shared_file_viewer viewer closed");
+    return 0;
+}
