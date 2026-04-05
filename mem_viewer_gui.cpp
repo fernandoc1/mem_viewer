@@ -1905,32 +1905,19 @@ public:
         refresh_layout->addWidget(refresh_button_);
         inspect_layout->addWidget(refresh_frame);
 
-        QFrame *goto_frame = new QFrame();
-        goto_frame->setFrameStyle(QFrame::Box | QFrame::Raised);
-        QVBoxLayout *goto_layout = new QVBoxLayout(goto_frame);
-        goto_layout->setContentsMargins(8, 8, 8, 8);
-        goto_layout->setSpacing(6);
-        goto_layout->addWidget(new QLabel("Go to position"));
-        goto_entry_ = new QLineEdit();
-        goto_entry_->setPlaceholderText("0x1234 or 4660");
-        goto_layout->addWidget(goto_entry_);
-        goto_button_ = new QPushButton("Go");
-        goto_layout->addWidget(goto_button_);
-        inspect_layout->addWidget(goto_frame);
-
-        connect(goto_entry_, &QLineEdit::returnPressed, this, [this]() {
-            goToPosition();
-        });
-        connect(goto_button_, &QPushButton::clicked, this, [this]() {
-            goToPosition();
-        });
-
         QFrame *navigation_frame = new QFrame();
         navigation_frame->setFrameStyle(QFrame::Box | QFrame::Raised);
         QVBoxLayout *navigation_layout = new QVBoxLayout(navigation_frame);
         navigation_layout->setContentsMargins(8, 8, 8, 8);
         navigation_layout->setSpacing(6);
         navigation_layout->addWidget(new QLabel("Navigation"));
+
+        navigation_layout->addWidget(new QLabel("Go to position"));
+        goto_entry_ = new QLineEdit();
+        goto_entry_->setPlaceholderText("0x1234 or 4660");
+        navigation_layout->addWidget(goto_entry_);
+        goto_button_ = new QPushButton("Go");
+        navigation_layout->addWidget(goto_button_);
 
         QHBoxLayout *navigation_buttons = new QHBoxLayout();
         back_button_ = new QPushButton("Back");
@@ -1950,6 +1937,12 @@ public:
         });
         connect(forward_button_, &QPushButton::clicked, this, [this]() {
             navigateHistory(1);
+        });
+        connect(goto_entry_, &QLineEdit::returnPressed, this, [this]() {
+            goToPosition();
+        });
+        connect(goto_button_, &QPushButton::clicked, this, [this]() {
+            goToPosition();
         });
 
         QFrame *edit_frame = new QFrame();
