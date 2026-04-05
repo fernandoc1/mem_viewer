@@ -1927,7 +1927,6 @@ public:
         navigation_label_ = new QLabel("No history");
         navigation_label_->setWordWrap(true);
         navigation_layout->addWidget(navigation_label_);
-        inspect_layout->addWidget(navigation_frame);
 
         connect(back_button_, &QPushButton::clicked, this, [this]() {
             navigateHistory(-1);
@@ -2080,6 +2079,7 @@ public:
             navigateNoteSearch(1, false);
         });
 
+        side_layout->addWidget(navigation_frame);
         side_layout->addWidget(side_tabs);
 
         QFrame *status_frame = new QFrame();
