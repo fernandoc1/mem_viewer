@@ -1462,6 +1462,13 @@ public:
         return memory_size_;
     }
 
+    bool readByteAt(size_t index, uint8_t &value) const {
+        if (index >= memory_size_) {
+            return false;
+        }
+        return read_memory_(index, &value, 1);
+    }
+
     bool dumpMemoryToFile(const QString &path, QString *error_message) const {
         QSaveFile output(path);
         if (!output.open(QIODevice::WriteOnly)) {
@@ -2447,6 +2454,18 @@ private:
             navigateSelectedByte(1);
         });
         addAction(next_byte);
+
+        QAction *copy_annotated_selection = edit_menu->addAction("Copy Annotated Selection");
+        connect(copy_annotated_selection, &QAction::triggered, this, [this]() {
+            copyAnnotatedSelection(false);
+        });
+        addAction(copy_annotated_selection);
+
+        QAction *copy_annotated_selection_with_comments = edit_menu->addAction("Copy Annotated Selection With Comments");
+        connect(copy_annotated_selection_with_comments, &QAction::triggered, this, [this]() {
+            copyAnnotatedSelection(true);
+        });
+        addAction(copy_annotated_selection_with_comments);
     }
 
     void selectAnnotationFile(const QString &path) {
@@ -2843,6 +2862,65 @@ private:
             return;
         }
 
+        if (QClipboard *clipboard = QApplication::clipboard()) {
+            clipboard->setText(QString::fromStdString(text));
+        }
+    }
+
+    void copyAnnotatedSelection(bool include_comments) {
+        if (viewer_widget_ == nullptr || current_selection_.empty()) {
+            return;
+        }
+
+        NoteTabState *state = currentNoteTabState();
+        if (state == nullptr) {
+            return;
+        }
+
+        std::ostringstream ss;
+        bool first_line = true;
+        for (size_t position : current_selection_) {
+            const AnnotationStore::ResolvedAnnotation annotation =
+                state->store.resolveForSelection(std::vector<size_t>{position});
+            if (!annotation.isValid()) {
+                continue;
+            }
+
+            uint8_t value = 0;
+            if (!viewer_widget_->readByteAt(position, value)) {
+                continue;
+            }
+
+            if (!first_line) {
+                ss << '\n';
+            }
+            first_line = false;
+            ss << "mem[0x"
+               << std::hex << std::uppercase << position
+               << "] = 0x";
+            ss.width(2);
+            ss.fill('0');
+            ss << static_cast<unsigned>(value) << ';';
+            if (include_comments) {
+                const std::string comment = trim_copy(annotation.note);
+                if (!comment.empty()) {
+                    ss << " // ";
+                    for (char ch : comment) {
+                        if (ch == '\n' || ch == '\r') {
+                            ss << ' ';
+                        } else {
+                            ss << ch;
+                        }
+                    }
+                }
+            }
+            ss << std::dec;
+        }
+
+        const std::string text = ss.str();
+        if (text.empty()) {
+            return;
+        }
         if (QClipboard *clipboard = QApplication::clipboard()) {
             clipboard->setText(QString::fromStdString(text));
         }
