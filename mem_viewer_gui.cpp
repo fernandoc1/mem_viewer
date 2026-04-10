@@ -333,6 +333,25 @@ static bool parse_memory_position(const std::string &text, size_t limit, size_t 
     return true;
 }
 
+static bool parse_memory_range(const std::string &text, size_t limit, size_t &start, size_t &end) {
+    const std::string trimmed = trim_copy(text);
+    const size_t dash = trimmed.find('-');
+    if (dash == std::string::npos) {
+        return false;
+    }
+
+    size_t parsed_start = 0;
+    size_t parsed_end = 0;
+    if (!parse_memory_position(trimmed.substr(0, dash), limit, parsed_start) ||
+        !parse_memory_position(trimmed.substr(dash + 1), limit, parsed_end)) {
+        return false;
+    }
+
+    start = std::min(parsed_start, parsed_end);
+    end = std::max(parsed_start, parsed_end);
+    return true;
+}
+
 static bool parse_hex_byte_sequence(const std::string &text, size_t width, std::vector<uint8_t> &pattern) {
     const std::string trimmed = trim_copy(text);
     if (trimmed.empty()) {
@@ -1409,6 +1428,16 @@ public:
         return true;
     }
 
+    bool selectRange(size_t start, size_t end) {
+        if (start >= memory_size_ || end >= memory_size_) {
+            return false;
+        }
+        setRangeSelection(start, end);
+        scroll_to_index(std::min(start, end));
+        refreshVisibleBytes();
+        return true;
+    }
+
     size_t getSelectedIndex() const {
         return selected_indices_.size() == 1 ? selected_indices_.front() : std::numeric_limits<size_t>::max();
     }
@@ -2035,6 +2064,13 @@ public:
         goto_button_ = new QPushButton("Go");
         navigation_layout->addWidget(goto_button_);
 
+        navigation_layout->addWidget(new QLabel("Select range"));
+        range_entry_ = new QLineEdit();
+        range_entry_->setPlaceholderText("0x1600-0x1700");
+        navigation_layout->addWidget(range_entry_);
+        range_button_ = new QPushButton("Select");
+        navigation_layout->addWidget(range_button_);
+
         QHBoxLayout *navigation_buttons = new QHBoxLayout();
         back_button_ = new QPushButton("Back");
         forward_button_ = new QPushButton("Forward");
@@ -2075,6 +2111,12 @@ public:
         });
         connect(goto_button_, &QPushButton::clicked, this, [this]() {
             goToPosition();
+        });
+        connect(range_entry_, &QLineEdit::returnPressed, this, [this]() {
+            selectRangeFromEntry();
+        });
+        connect(range_button_, &QPushButton::clicked, this, [this]() {
+            selectRangeFromEntry();
         });
 
         QFrame *edit_frame = new QFrame();
@@ -2562,6 +2604,25 @@ private:
         viewer_widget_->jumpToIndex(index);
     }
 
+    void selectRangeFromEntry() {
+        if (!viewer_widget_) {
+            return;
+        }
+
+        size_t start = 0;
+        size_t end = 0;
+        if (!parse_memory_range(range_entry_->text().toStdString(), viewer_widget_->getMemorySize(), start, end)) {
+            QMessageBox::warning(
+                this,
+                QStringLiteral("Select range"),
+                QStringLiteral("Enter a valid range like 0x1600-0x1700 within 0 to %1.")
+                    .arg(viewer_widget_->getMemorySize() == 0 ? 0 : viewer_widget_->getMemorySize() - 1));
+            return;
+        }
+
+        viewer_widget_->selectRange(start, end);
+    }
+
     void jumpToNoteLink(const QString &targetText) {
         if(viewer_widget_ == nullptr) {
             return;
@@ -3017,6 +3078,8 @@ private:
     QPushButton *refresh_button_;
     QLineEdit *goto_entry_;
     QPushButton *goto_button_;
+    QLineEdit *range_entry_ = nullptr;
+    QPushButton *range_button_ = nullptr;
     QPushButton *back_button_ = nullptr;
     QPushButton *forward_button_ = nullptr;
     QLabel *navigation_label_ = nullptr;
