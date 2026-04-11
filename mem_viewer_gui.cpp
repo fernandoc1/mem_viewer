@@ -233,6 +233,7 @@ private:
 enum class SearchFormat {
     Hex,
     Decimal,
+    Sequence,
 };
 
 enum class EndianMode {
@@ -349,6 +350,48 @@ static bool parse_memory_range(const std::string &text, size_t limit, size_t &st
 
     start = std::min(parsed_start, parsed_end);
     end = std::max(parsed_start, parsed_end);
+    return true;
+}
+
+static bool parse_hex_sequence(const std::string &text, std::vector<uint8_t> &pattern) {
+    const std::string trimmed = trim_copy(text);
+    if (trimmed.empty()) {
+        return false;
+    }
+
+    std::vector<uint8_t> parsed_bytes;
+    if (trimmed.find_first_of(" \t\r\n,;:-") != std::string::npos) {
+        std::istringstream input(trimmed);
+        std::string token;
+        while (input >> token) {
+            uint8_t value = 0;
+            if (!parse_byte_value(token, value)) {
+                return false;
+            }
+            parsed_bytes.push_back(value);
+        }
+    } else {
+        std::string digits = trimmed;
+        if (digits.size() > 2 && digits[0] == '0' && (digits[1] == 'x' || digits[1] == 'X')) {
+            digits = digits.substr(2);
+        }
+        if (digits.size() % 2 != 0) {
+            return false;
+        }
+        for (size_t i = 0; i < digits.size(); i += 2) {
+            uint8_t value = 0;
+            if (!parse_byte_value(digits.substr(i, 2), value)) {
+                return false;
+            }
+            parsed_bytes.push_back(value);
+        }
+    }
+
+    if (parsed_bytes.empty()) {
+        return false;
+    }
+
+    pattern = std::move(parsed_bytes);
     return true;
 }
 
@@ -1328,36 +1371,51 @@ public:
         matches_.clear();
         active_match_index_ = 0;
 
-        if (width == 0 || width > 8 || width > memory_size_) {
+        std::vector<uint8_t> pattern;
+        if (format == SearchFormat::Sequence) {
+            if (!parse_hex_sequence(search_text, pattern)) {
+                update();
+                if (onSearchStatusUpdated) onSearchStatusUpdated();
+                return;
+            }
+        } else {
+            if (width == 0 || width > 8 || width > memory_size_) {
+                update();
+                if (onSearchStatusUpdated) onSearchStatusUpdated();
+                return;
+            }
+            pattern.resize(width);
+            if (format == SearchFormat::Hex && parse_hex_byte_sequence(search_text, width, pattern)) {
+                // Explicit byte sequences are already in the typed search order.
+            } else {
+                uint64_t value = 0;
+                if (!parse_uint64_value(search_text, format, value)) {
+                    update();
+                    if (onSearchStatusUpdated) onSearchStatusUpdated();
+                    return;
+                }
+
+                if (endian == EndianMode::Little) {
+                    for (size_t i = 0; i < width; ++i) {
+                        pattern[i] = static_cast<uint8_t>((value >> (8 * i)) & 0xffU);
+                    }
+                } else {
+                    for (size_t i = 0; i < width; ++i) {
+                        pattern[width - 1 - i] = static_cast<uint8_t>((value >> (8 * i)) & 0xffU);
+                    }
+                }
+            }
+        }
+
+        const size_t effective_width = pattern.size();
+        if (effective_width == 0 || effective_width > memory_size_) {
             update();
             if (onSearchStatusUpdated) onSearchStatusUpdated();
             return;
         }
 
-        std::vector<uint8_t> pattern(width);
-        if (format == SearchFormat::Hex && parse_hex_byte_sequence(search_text, width, pattern)) {
-            // Explicit byte sequences are already in the typed search order.
-        } else {
-            uint64_t value = 0;
-            if (!parse_uint64_value(search_text, format, value)) {
-                update();
-                if (onSearchStatusUpdated) onSearchStatusUpdated();
-                return;
-            }
-
-            if (endian == EndianMode::Little) {
-                for (size_t i = 0; i < width; ++i) {
-                    pattern[i] = static_cast<uint8_t>((value >> (8 * i)) & 0xffU);
-                }
-            } else {
-                for (size_t i = 0; i < width; ++i) {
-                    pattern[width - 1 - i] = static_cast<uint8_t>((value >> (8 * i)) & 0xffU);
-                }
-            }
-        }
-
-        const size_t chunk_size = std::max(kSearchChunkBytes, width);
-        std::vector<uint8_t> chunk(chunk_size + width);
+        const size_t chunk_size = std::max(kSearchChunkBytes, effective_width);
+        std::vector<uint8_t> chunk(chunk_size + effective_width);
         size_t offset = 0;
 
         while (offset < memory_size_) {
@@ -1366,13 +1424,13 @@ public:
                 break;
             }
 
-            for (size_t i = 0; i + width <= span; ++i) {
-                if (std::memcmp(chunk.data() + i, pattern.data(), width) != 0) {
+            for (size_t i = 0; i + effective_width <= span; ++i) {
+                if (std::memcmp(chunk.data() + i, pattern.data(), effective_width) != 0) {
                     continue;
                 }
                 const size_t match_index = offset + i;
                 matches_.push_back(match_index);
-                for (size_t j = 0; j < width; ++j) {
+                for (size_t j = 0; j < effective_width; ++j) {
                     match_mask_[match_index + j] = 1;
                 }
             }
@@ -2170,6 +2228,7 @@ public:
         format_combo_ = new QComboBox();
         format_combo_->addItem("Hex");
         format_combo_->addItem("Decimal");
+        format_combo_->addItem("Sequence");
         search_layout->addWidget(format_combo_);
 
         search_layout->addWidget(new QLabel("Bytes"));
@@ -2185,6 +2244,13 @@ public:
         endian_combo_->addItem("Little");
         endian_combo_->addItem("Big");
         search_layout->addWidget(endian_combo_);
+
+        connect(format_combo_, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int index) {
+            bool is_sequence = (index == 2);
+            width_combo_->setEnabled(!is_sequence);
+            endian_combo_->setEnabled(!is_sequence);
+            rebuildSearch();
+        });
 
         QHBoxLayout *search_nav = new QHBoxLayout();
         prev_button_ = new QPushButton("Prev");
@@ -2573,7 +2639,13 @@ private:
         if (!viewer_widget_) return;
         
         const std::string search_text = search_entry_->text().toStdString();
-        const SearchFormat format = format_combo_->currentIndex() == 0 ? SearchFormat::Hex : SearchFormat::Decimal;
+        SearchFormat format;
+        switch(format_combo_->currentIndex()) {
+            case 0: format = SearchFormat::Hex; break;
+            case 1: format = SearchFormat::Decimal; break;
+            case 2: format = SearchFormat::Sequence; break;
+            default: format = SearchFormat::Hex; break;
+        }
         const EndianMode endian = endian_combo_->currentIndex() == 0 ? EndianMode::Little : EndianMode::Big;
         const size_t width = static_cast<size_t>(width_combo_->currentText().toULongLong());
         
